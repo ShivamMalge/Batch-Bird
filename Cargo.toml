@@ -1,0 +1,35 @@
+[package]
+name = "batchbird"
+version = "0.1.0"
+edition = "2024"
+description = "Mini columnar query engine — vectorized execution benchmark study"
+publish = false
+
+[features]
+# `std::simd` (portable_simd) is still nightly-only as of 2026-08, so all SIMD code sits
+# behind this flag. Default build + tests run on stable with the scalar path only:
+#   cargo test
+#   cargo +nightly test  --features simd
+#   cargo +nightly bench --features simd
+# See techstack.md "Language / Toolchain" and phases.md Phase 5.
+simd = []
+
+[dependencies]
+csv = "1.4.0"
+# Fast hasher: std's SipHash would dominate the build-group-index phase timing and distort
+# the headline benchmark. See techstack.md "Crates".
+hashbrown = "0.17.1"
+sqlparser = "0.62.0"
+
+[dev-dependencies]
+# html_reports + csv_output are NOT criterion defaults; both are enabled for the Phase 7
+# deliverable (charts, and raw timings we can re-plot ourselves).
+criterion = { version = "0.8.2", features = ["html_reports", "csv_output"] }
+
+[profile.bench]
+# The entire project is a benchmark, so measurement stability outweighs compile time.
+# codegen-units = 1 keeps inlining decisions deterministic between runs; debug symbols let
+# us profile hash-group's two phases separately (systemDesign.md "Group-By").
+codegen-units = 1
+debug = true
+lto = "thin"
