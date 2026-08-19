@@ -45,6 +45,20 @@ pub enum Error {
         value: String,
         expected: DataType,
     },
+
+    /// A column named in the query is not in the table.
+    ///
+    /// The parser validates *shape*; it has never seen the data, so it cannot know which
+    /// names exist. That check lands here, when the plan first meets a `Table`.
+    UnknownColumn {
+        column: String,
+        /// Sorted, so the message is deterministic despite `Table` keying columns by hash.
+        available: Vec<String>,
+    },
+
+    /// A column exists, but its type cannot serve the role the query gives it -- summing a
+    /// string, grouping by a float, comparing a number against a quoted literal.
+    TypeError(String),
 }
 
 impl fmt::Display for Error {
@@ -80,6 +94,12 @@ impl fmt::Display for Error {
                 f,
                 "could not parse {value:?} as {expected} for column {column:?} (row {row})"
             ),
+            Error::UnknownColumn { column, available } => write!(
+                f,
+                "no column named {column:?}; the table has: {}",
+                available.join(", ")
+            ),
+            Error::TypeError(detail) => write!(f, "type error: {detail}"),
         }
     }
 }

@@ -5,13 +5,14 @@
 //! `prd.md` (scope), `architecture.md` (shapes), `systemDesign.md` (rationale),
 //! `phases.md` (build order), `agents.md` (guardrails).
 //!
-//! **Current state: Phase 2 (SQL parsing) complete.** The exec module lands in Phase 4.
+//! **Current state: Phase 3 (naive baseline) complete.** The exec module lands in Phase 4.
 
 // `std::simd` is still nightly-only (2026-08). Applying the feature attribute conditionally
 // is what lets the default build, and every correctness test, stay on stable.
 // See Cargo.toml [features] and techstack.md.
 #![cfg_attr(feature = "simd", feature(portable_simd))]
 
+pub mod bench;
 pub mod error;
 pub mod parser;
 pub mod plan;
