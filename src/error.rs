@@ -15,6 +15,17 @@ pub enum Error {
     Io(std::io::Error),
     Csv(csv::Error),
 
+    /// The text is not valid SQL at all -- `sqlparser` could not read it.
+    Sql(sqlparser::parser::ParserError),
+
+    /// Perfectly valid SQL that falls outside the one supported query shape.
+    ///
+    /// Kept distinct from [`Error::Sql`] because they mean opposite things to a user: one is
+    /// "you typed it wrong", the other is "this engine deliberately does not do that"
+    /// (`agents.md` Hard Guardrails). The payload names the specific construct, and the
+    /// `Display` impl appends the shape that *is* supported.
+    Unsupported(String),
+
     /// `Table` stores columns in a map keyed by name, so two identically-named CSV columns
     /// would silently shadow each other. Caught at load time instead.
     DuplicateColumn(String),
@@ -41,6 +52,14 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "io error: {e}"),
             Error::Csv(e) => write!(f, "csv error: {e}"),
+            Error::Sql(e) => write!(f, "could not parse SQL: {e}"),
+            Error::Unsupported(what) => write!(
+                f,
+                "unsupported query: {what}\n\
+                 batchbird supports exactly one query shape:\n  \
+                 SELECT col1, SUM(col2) FROM t WHERE col3 <op> x GROUP BY col1\n  \
+                 (op is one of =, <, >)"
+            ),
             Error::DuplicateColumn(name) => {
                 write!(f, "duplicate column name in CSV header: {name:?}")
             }
@@ -70,8 +89,15 @@ impl std::error::Error for Error {
         match self {
             Error::Io(e) => Some(e),
             Error::Csv(e) => Some(e),
+            Error::Sql(e) => Some(e),
             _ => None,
         }
+    }
+}
+
+impl From<sqlparser::parser::ParserError> for Error {
+    fn from(e: sqlparser::parser::ParserError) -> Self {
+        Error::Sql(e)
     }
 }
 

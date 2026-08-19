@@ -333,7 +333,10 @@ north,50,5.5
         let (dict, codes) = t.column("region").unwrap().as_utf8_dict().unwrap();
 
         // Three distinct values across five rows -- the compression dictionary encoding buys.
-        assert_eq!(dict, ["north".to_string(), "south".to_string(), "east".to_string()]);
+        assert_eq!(
+            dict,
+            ["north".to_string(), "south".to_string(), "east".to_string()]
+        );
         assert_eq!(codes, [0, 1, 0, 2, 0]);
 
         // Not sorted: "east" arrives last despite sorting first. `systemDesign.md` leans on
@@ -385,7 +388,10 @@ north,50,5.5
         assert_eq!(t.column("a").unwrap().utf8_value(1), Some(""));
 
         let (dict, _) = t.column("a").unwrap().as_utf8_dict().unwrap();
-        assert!(dict.contains(&String::new()), "blank should be a dict entry");
+        assert!(
+            dict.contains(&String::new()),
+            "blank should be a dict entry"
+        );
     }
 
     #[test]
@@ -469,7 +475,10 @@ north,50,5.5
                 expected,
             } => {
                 assert_eq!(column, "a");
-                assert_eq!(row, 1, "row index is 0-based over data rows, excluding header");
+                assert_eq!(
+                    row, 1,
+                    "row index is 0-based over data rows, excluding header"
+                );
                 assert_eq!(value, "oops");
                 assert_eq!(expected, DataType::Int64);
             }

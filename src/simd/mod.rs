@@ -43,7 +43,8 @@ pub fn sum_i64_simd(values: &[i64]) -> i64 {
 
     // Horizontal reduce, then fold in the remainder the scalar way. Every real kernel has
     // this same shape: a vectorized body plus a scalar tail for the ragged end.
-    acc.reduce_sum().wrapping_add(tail.iter().fold(0i64, |a, b| a.wrapping_add(*b)))
+    acc.reduce_sum()
+        .wrapping_add(tail.iter().fold(0i64, |a, b| a.wrapping_add(*b)))
 }
 
 #[cfg(test)]

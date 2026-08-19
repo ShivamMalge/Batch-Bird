@@ -48,7 +48,10 @@ pub enum Column {
     /// sorting it would make code order match lexical order and let `<`/`>` filters compare
     /// codes, but sorting is out of scope, so ordering filters fall back to comparing the
     /// strings themselves (`systemDesign.md` "String Columns").
-    Utf8Dict { dict: Vec<String>, codes: Vec<u32> },
+    Utf8Dict {
+        dict: Vec<String>,
+        codes: Vec<u32>,
+    },
 }
 
 impl Column {
