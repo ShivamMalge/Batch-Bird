@@ -276,11 +276,6 @@ fn column<'a>(table: &'a Table, name: &str) -> Result<&'a Column> {
     })
 }
 
-/// The output column name for the aggregate, matching how SQL would label it.
-pub fn sum_column_name(input: &str) -> String {
-    format!("SUM({input})")
-}
-
 fn build_result(
     plan: &LogicalPlan,
     group: &GroupReader<'_>,
@@ -293,9 +288,12 @@ fn build_result(
         GroupReader::Utf8 { dict, .. } => {
             // One row per group, so the result dictionary is exactly the group values and
             // the codes are simply 0..n.
-            let dict = keys.iter().map(|k| dict[*k as usize].clone()).collect();
+            let dict: Vec<String> = keys.iter().map(|k| dict[*k as usize].clone()).collect();
             let codes = (0..keys.len() as u32).collect();
-            Column::Utf8Dict { dict, codes }
+            Column::Utf8Dict {
+                dict: dict.into(),
+                codes,
+            }
         }
     };
 
@@ -306,7 +304,10 @@ fn build_result(
 
     let mut columns = HashMap::new();
     columns.insert(plan.group_by.clone(), group_column);
-    columns.insert(sum_column_name(&plan.aggregation.input), agg_column);
+    // The output schema is a property of the query, not of the engine running it, so both
+    // implementations label the result through the same definition. It is what lets the
+    // parity test compare them by name.
+    columns.insert(plan.aggregation.output_name(), agg_column);
 
     Table::new(columns, keys.len())
 }
@@ -355,7 +356,7 @@ mod tests {
     /// Result rows as `(group, sum)` pairs, sorted so assertions never depend on group order.
     fn pairs(result: &Table, group: &str, input: &str) -> Vec<(String, String)> {
         let group_col = result.column(group).expect("group column");
-        let agg_col = result.column(&sum_column_name(input)).expect("agg column");
+        let agg_col = result.column(&format!("SUM({input})")).expect("agg column");
 
         let mut rows: Vec<(String, String)> = (0..result.nrows())
             .map(|row| {

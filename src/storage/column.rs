@@ -7,6 +7,7 @@
 //! struct-of-fields layout.
 
 use std::fmt;
+use std::sync::Arc;
 
 /// The three types in scope. No `Bool` — see `prd.md` Non-Goals: no source data in scope is
 /// boolean-shaped, and the only boolean artifact in the engine is the filter mask, which is
@@ -44,12 +45,20 @@ pub enum Column {
     ///   rather than pointer-chasing and byte comparison, per row (`systemDesign.md`).
     /// - **Equality filters** resolve the literal to a code once, then compare integers.
     ///
+    /// The dictionary sits behind an `Arc` so that cutting a table into batches *shares* it
+    /// rather than copying it. Not a micro-optimization: with an owned `Vec<String>`, every
+    /// batch cloned the entire dictionary twice (once in `Scan`, once in `Filter` compaction),
+    /// which measured 84x slower than the row-at-a-time baseline at 10k distinct values, while
+    /// an `Int64` group column over identical data stayed at 1.1x. Arrow and DuckDB share
+    /// dictionaries for exactly this reason. (Amended 2026-09-04 with sign-off;
+    /// `architecture.md` originally pinned a plain `Vec<String>`.)
+    ///
     /// The dictionary is in **first-seen order, not sorted**. That is a deliberate cost:
     /// sorting it would make code order match lexical order and let `<`/`>` filters compare
     /// codes, but sorting is out of scope, so ordering filters fall back to comparing the
     /// strings themselves (`systemDesign.md` "String Columns").
     Utf8Dict {
-        dict: Vec<String>,
+        dict: Arc<[String]>,
         codes: Vec<u32>,
     },
 }
@@ -131,7 +140,10 @@ mod tests {
             };
             codes.push(code);
         }
-        Column::Utf8Dict { dict, codes }
+        Column::Utf8Dict {
+            dict: dict.into(),
+            codes,
+        }
     }
 
     #[test]

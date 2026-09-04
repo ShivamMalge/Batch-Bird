@@ -7,4 +7,4 @@
 
 mod naive;
 
-pub use naive::{naive_query, sum_column_name};
+pub use naive::naive_query;

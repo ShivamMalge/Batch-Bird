@@ -222,7 +222,10 @@ impl Builder {
         match self {
             Builder::Int64(values) => Column::Int64(values),
             Builder::Float64(values) => Column::Float64(values),
-            Builder::Utf8 { dict, codes, .. } => Column::Utf8Dict { dict, codes },
+            Builder::Utf8 { dict, codes, .. } => Column::Utf8Dict {
+                dict: dict.into(),
+                codes,
+            },
         }
     }
 }

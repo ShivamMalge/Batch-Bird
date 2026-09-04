@@ -5,7 +5,7 @@
 //! `prd.md` (scope), `architecture.md` (shapes), `systemDesign.md` (rationale),
 //! `phases.md` (build order), `agents.md` (guardrails).
 //!
-//! **Current state: Phase 3 (naive baseline) complete.** The exec module lands in Phase 4.
+//! **Current state: Phase 4 (batch execution pipeline) complete.** SIMD lands in Phase 5.
 
 // `std::simd` is still nightly-only (2026-08). Applying the feature attribute conditionally
 // is what lets the default build, and every correctness test, stay on stable.
@@ -14,6 +14,7 @@
 
 pub mod bench;
 pub mod error;
+pub mod exec;
 pub mod parser;
 pub mod plan;
 pub mod storage;
