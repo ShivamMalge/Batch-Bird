@@ -180,12 +180,12 @@ impl Builder {
         }
     }
 
-    fn push(&mut self, field: &str, column: &str, row: usize) -> Result<()> {
+    fn push(&mut self, field: &str, column: &str, line: u64) -> Result<()> {
         match self {
             Builder::Int64(values) => {
                 let v = parse_i64(field).ok_or_else(|| Error::Parse {
                     column: column.to_string(),
-                    row,
+                    line,
                     value: field.to_string(),
                     expected: DataType::Int64,
                 })?;
@@ -194,7 +194,7 @@ impl Builder {
             Builder::Float64(values) => {
                 let v = parse_f64(field).ok_or_else(|| Error::Parse {
                     column: column.to_string(),
-                    row,
+                    line,
                     value: field.to_string(),
                     expected: DataType::Float64,
                 })?;
@@ -233,7 +233,7 @@ impl Builder {
 /// Load CSV into a `Table` using an explicit schema.
 ///
 /// The schema supplies types; the CSV header supplies names. A value contradicting the
-/// schema is an [`Error::Parse`] naming the column, row, and offending text -- a case that
+/// schema is an [`Error::Parse`] naming the column, file line, and offending text -- a case that
 /// cannot arise when the schema came from [`infer_schema`] over the same data.
 ///
 /// Columns absent from the schema fall back to `Utf8`, which is lossless: a partial schema
@@ -252,8 +252,11 @@ pub fn read_csv<R: Read>(reader: R, schema: &Schema) -> Result<Table> {
     let mut nrows = 0usize;
     let mut record = csv::StringRecord::new();
     while rdr.read_record(&mut record)? {
+        // The reader's own line number for this record, so an error points at the real file
+        // line even though blank lines are skipped and never become rows.
+        let line = record.position().map_or(0, |p| p.line());
         for (i, field) in record.iter().enumerate().take(names.len()) {
-            builders[i].push(field, &names[i], nrows)?;
+            builders[i].push(field, &names[i], line)?;
         }
         nrows += 1;
     }
@@ -473,17 +476,36 @@ north,50,5.5
         match read_csv(csv.as_bytes(), &schema).unwrap_err() {
             Error::Parse {
                 column,
-                row,
+                line,
                 value,
                 expected,
             } => {
                 assert_eq!(column, "a");
-                assert_eq!(
-                    row, 1,
-                    "row index is 0-based over data rows, excluding header"
-                );
+                assert_eq!(line, 3, "header is line 1, so the bad value sits on line 3");
                 assert_eq!(value, "oops");
                 assert_eq!(expected, DataType::Int64);
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reported_line_does_not_count_blank_lines() {
+        // Discovered by writing this test expecting 5. The csv reader's line counter skips
+        // wholly blank lines just as its record iterator does, so a file containing them
+        // reports lower than the physical editor line. The physical number is not available
+        // through the reader's API -- blank lines are consumed invisibly -- so
+        // `Error::Parse::line` documents this limit rather than claiming a precision it
+        // cannot deliver.
+        //
+        // "oops" sits on physical line 5 here, and is reported as line 3.
+        let csv = "a\n1\n\n\noops\n";
+        let schema = Schema::new(vec![Field::new("a", DataType::Int64)]);
+
+        match read_csv(csv.as_bytes(), &schema).unwrap_err() {
+            Error::Parse { line, value, .. } => {
+                assert_eq!(value, "oops");
+                assert_eq!(line, 3, "blank lines are not counted");
             }
             other => panic!("expected Parse, got {other:?}"),
         }

@@ -41,7 +41,17 @@ pub enum Error {
     /// an inferred schema is correct by construction.
     Parse {
         column: String,
-        row: usize,
+        /// **1-based line number as the CSV reader counts them**, with the header as line 1.
+        ///
+        /// Taken from the reader's own record position, not a row counter, so it lines up
+        /// with the source file rather than being an index into the parsed rows.
+        ///
+        /// One caveat, measured rather than assumed: the reader does not count wholly blank
+        /// lines, so in a file containing them this can be lower than the physical line in a
+        /// text editor. The physical number is not recoverable through the reader's API --
+        /// blank lines are consumed invisibly -- so this reports what can actually be known,
+        /// and says so. Pinned by test in `csv_loader`.
+        line: u64,
         value: String,
         expected: DataType,
     },
@@ -87,12 +97,12 @@ impl fmt::Display for Error {
             ),
             Error::Parse {
                 column,
-                row,
+                line,
                 value,
                 expected,
             } => write!(
                 f,
-                "could not parse {value:?} as {expected} for column {column:?} (row {row})"
+                "could not parse {value:?} as {expected} for column {column:?} (line {line})"
             ),
             Error::UnknownColumn { column, available } => write!(
                 f,

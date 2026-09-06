@@ -136,6 +136,14 @@ fn query_to_select(query: Query) -> Result<Select> {
 }
 
 fn select_to_plan(select: Select) -> Result<LogicalPlan> {
+    // Exhaustive, like `query_to_select` -- no `..`. `Select` is the larger struct and the
+    // likelier place for a new *semantic* clause to appear in a future sqlparser, so it is
+    // the one that most needs the tripwire: adding a field upstream breaks this line rather
+    // than silently producing a wrong answer for a clause nobody handled.
+    //
+    // The four bound-and-ignored fields are syntax metadata, not semantics: where the SELECT
+    // token sat, whether TOP preceded DISTINCT, whether WINDOW preceded QUALIFY, and whether
+    // the query was written FROM-first. None of them changes what the query computes.
     let Select {
         distinct,
         top,
@@ -157,7 +165,10 @@ fn select_to_plan(select: Select) -> Result<LogicalPlan> {
         optimizer_hints,
         select_modifiers,
         exclude,
-        ..
+        select_token: _,
+        top_before_distinct: _,
+        window_before_qualify: _,
+        flavor: _,
     } = select;
 
     if distinct.is_some() {
