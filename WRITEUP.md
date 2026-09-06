@@ -13,9 +13,11 @@ execution?
 | Amdahl ceiling predicted from the kernels' measured share | **1.038×** |
 | Observed at that point | **1.039×** |
 
-The filter kernel occupies **11.7%** of query time. Speeding up 11.7% of anything by 1.46×
-caps the whole at 1.038×, and the query delivered 1.039× — agreement to **one tenth of a
-percentage point**, well inside the harness's 2.25% resolution.
+The filter kernel occupies **11.7%** of query time at 1M rows, 50% selectivity and 128 groups.
+Speeding up 11.7% of anything by 1.46× caps the whole at 1.038×, and the query delivered 1.039×
+— agreement to **one tenth of a percentage point**, well inside the harness's 2.25% resolution.
+That share is not a constant: at 250,000 groups it falls to 1.6%, because hash group-by comes to
+dominate everything else. §2 gives both.
 
 So the null result is not "SIMD mysteriously failed." It is Amdahl's law, quantified, with a
 model that says exactly what would have been required instead: to get a 1.3× query from a 1.46×
@@ -45,6 +47,12 @@ the act of granting permission to reorder.
 
 Both SIMD sums then land at the same wall time for the same 128 MB — 6.38 and 6.52 ms, about
 20 GB/s — which is the memory-bandwidth ceiling the `i64` loop had already reached on its own.
+
+That ceiling is **a property of a dense reduction over a contiguous 128 MB array, and the query
+pipeline does not inherit it.** A kernel sweeping one column in a tight loop can saturate memory;
+a query that also hashes, probes, allocates and scatters cannot get near it, and does not — it
+runs at 4–9% of that figure. An early claim that the pipeline was bandwidth-bound above 4M rows
+rested on exactly this conflation and is struck in §5.
 
 The same property runs through the whole project: **non-associativity is why the `f64` sum needs
 a test tolerance, and why it is the one with a speedup to win.**
@@ -156,9 +164,10 @@ measures **1.67×**. The probe differs in exactly one thing: its group key is a 
 engine's is a `Box<str>`. The missing factor is **dictionary encoding** — a pointer chase and a
 string hash per row, versus an integer.
 
-The cardinality sweep corroborates it independently. The gap grows 1.61× → **8.97×** as distinct
-values rise from 8 to 250,000, which is what string-hashing cost does and what cache-line
-utilization does not:
+The cardinality sweep corroborates it independently — 1M rows, 50% selectivity, `Box<str>` group
+key as the engine actually stores it. The gap grows 1.61× → **8.97×** as distinct values rise
+from 8 to 250,000, which is what string-hashing cost does and what cache-line utilization does
+not:
 
 | cardinality | row-vs-columnar | execution model |
 |---|---|---|
@@ -253,6 +262,18 @@ time.
 The pattern is worth naming: **every one of these was caught by a control that existed for a
 different reason.** None was found by inspecting the numbers and finding them implausible.
 
+That has a consequence, and it runs against how benchmark harnesses normally get built. The
+control gate was written to detect a third variable inside the kernels, and what it actually
+exposed was that the whole measurement floor was above the effect. `environment()` was written so
+results would be reproducible later, and it caught a scalar-vs-SIMD comparison that had silently
+also changed compiler. The determinism canary was written to rule out a seeding bug in the data
+generator, and instead found that both hash maps were seeded per process. In each case the
+control was built before there was a known use for it, and in each case it caught something its
+author was not looking for — which is an argument for **building the controls first, on
+principle, rather than adding them once a specific doubt appears.** By the time a number looks
+wrong enough to investigate, the control that would have explained it is the one you did not
+build.
+
 ## 6. Why the numbers are trustworthy
 
 The first benchmark suite produced a large body of results that all had to be discarded. Two
@@ -303,9 +324,9 @@ Each of these is a choice with a stated cost, not a gap.
   column of every batch *before* the filter runs. Since `Scan` holds `&'a Table`, which outlives
   the query, a borrowing `RecordBatch` would remove that copy entirely.
 
-  **Deliberately not implemented**, and this is the one cut with a measured price. Batched
-  execution runs at **0.87–0.91×** the naive row loop below 10% selectivity — batching is a net
-  *loss* there. Scan is 12.5% of query time at 50% selectivity, but its cost is independent of
+  **Deliberately not implemented**, and this is the one cut with a measured price. At 1M rows
+  and 128 groups, batched execution runs at **0.87–0.91×** the naive row loop below 10%
+  selectivity — batching is a net *loss* there. Scan is 12.5% of query time at 50% selectivity, but its cost is independent of
   selectivity while everything downstream shrinks, so at 1% selectivity it is roughly 30% of the
   query and removing the write half would be worth about 1.18× — enough to turn that loss into
   roughly break-even.

@@ -640,5 +640,27 @@ matter.**
 - Every number carries machine, toolchain, power scheme, pinning, estimator, resolution, and
   both seeds.
 
+## Project complete — 2026-09-06
+
+All eight phases done. The deliverable is `WRITEUP.md`; `results/` holds the raw output that
+backs every figure in it, and this file holds the decision log, including everything that was
+measured, reported, and then struck.
+
+Final state: 152 tests on stable, 163 on nightly with `--features bench-dispatch`, 12 parity
+tests across four execution strategies, clippy and rustfmt clean on both configurations, CI
+green on both toolchains.
+
+The headline: SIMD kernels are 1.46–3.81× faster in isolation, whole queries are ~1.00×, and the
+Amdahl arithmetic predicts that to within 0.1 percentage points. Vectorizing the two hot loops
+this engine has does not make its queries faster — and the model says what would have been
+required instead.
+
+Two things that outlasted their phases and belong in any follow-on work:
+- **Copy-on-scan** is the known optimization most worth doing next (§7 of the write-up), cut
+  deliberately with its price measured rather than left implicit.
+- **The controls are the reason the numbers are believable.** The A/A null, `environment()`, and
+  `examples/determinism.rs` each caught something their author was not looking for. Keep them on
+  every future measurement; if any moves, the run is void.
+
 ## Explicit Non-Goals (do not implement without revisiting prd.md)
 - Joins, multi-column GROUP BY, full SQL surface, SIMD string matching.
