@@ -443,6 +443,26 @@ lands on both arms and cancels in the ratio, which is the whole reason for alter
 - **Permanent canaries.** The control gate and `examples/determinism.rs` run on every
   measurement. If either moves, the run is void.
 
+### Prediction, recorded before the SIMD measurement was taken
+
+Written down first so it can be refuted rather than rationalised afterwards.
+
+**Claim: no cardinality exists at which sort-group + SIMD beats hash-group.**
+
+The reasoning it stands or falls on. Sort-group is the only path on which the SIMD sum kernel
+reaches a real query, and it consumes a dense slice per *run* — so its benefit scales with run
+length, which is `surviving rows / cardinality`. That puts the two ends in a vice:
+
+- **High cardinality** is where sort-group is closest to competitive (0.90x at 250k, inside
+  hash's variance band). But at 1M rows and 50% selectivity, 250k groups means runs average
+  **~2 rows**. A vector sum over 2 elements is all tail and no vector; the kernel cannot pay.
+- **Low cardinality** gives long runs the kernel can actually use — but there hash already wins
+  by 2.0-2.45x, far more than any plausible sum speedup. Even the 3.81x `f64` kernel result from
+  Phase 5 applies only to `aggregate-runs`, which is 0.5 ms of a 19-25 ms strategy.
+
+So the sum kernel is fast exactly where there is nothing to sum, and useless exactly where it
+would have mattered. Confirm or refute reported below.
+
 ### Outstanding
 - SIMD dispatch restructure: runtime selection behind a bench-only feature, resolved **per
   kernel call, never per row**; default build keeps `cfg` dispatch and zero runtime branch.
