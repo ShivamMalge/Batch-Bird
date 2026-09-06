@@ -1,0 +1,85 @@
+name: CI
+
+# The build story is two toolchains: stable for everything, nightly for the SIMD feature
+# because `std::simd` is still unstable. Both are checked here, because a change that only
+# breaks one of them is exactly the kind that goes unnoticed locally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Benchmarks are compiled but never run in CI: a shared runner's timings are noise, and
+  # treating them as signal would be worse than not measuring at all.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  stable:
+    name: stable — test, clippy, fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --all-targets
+
+      - name: Doctests
+        run: cargo test --doc
+
+      # Guards against benchmark targets rotting: they are not built by `cargo test`, so
+      # without this a broken harness would sit unnoticed until someone ran `cargo bench`.
+      - name: Benchmarks compile
+        run: cargo bench --no-run
+
+  nightly:
+    name: nightly — SIMD feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Deliberately not pinned to a dated nightly. `std::simd` is unstable and its surface
+      # does change; an unpinned nightly means CI tells us early rather than letting the
+      # project drift against an API that has moved. If this becomes noisy, pin a date here
+      # rather than in rust-toolchain.toml -- that file sets the toolchain for *every*
+      # command, which would silently move the default build off stable.
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (SIMD)
+        run: cargo clippy --all-targets --features simd -- -D warnings
+
+      # Runs the scalar kernels and the SIMD kernels and asserts they agree, which is the
+      # check that matters most on this job.
+      - name: Tests (SIMD)
+        run: cargo test --all-targets --features simd
+
+      - name: Doctests (SIMD)
+        run: cargo test --doc --features simd
+
+      - name: Benchmarks compile (SIMD)
+        run: cargo bench --no-run --features simd
+
+      # The scalar path must keep working on nightly too, so a nightly-only regression in the
+      # fallback cannot hide behind the feature being on.
+      - name: Tests (scalar on nightly)
+        run: cargo test --all-targets
