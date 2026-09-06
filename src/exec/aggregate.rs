@@ -102,6 +102,13 @@ pub trait Summable: Copy + Default {
     /// single seam through which the Phase 5 SIMD sum kernel reaches the query path, and it is
     /// why sort-group can vectorize its aggregation where hash-group cannot.
     fn sum_slice(values: &[Self]) -> Self;
+
+    /// Sum with an explicitly chosen kernel.
+    ///
+    /// Lets `SortAggregate` read the mode **once per aggregation** instead of once per run. At
+    /// high cardinality a run is a couple of rows, so a per-run dispatch would sit close enough
+    /// to per-row to contaminate what it is measuring.
+    fn sum_slice_with(kernel: crate::exec::kernels::Kernel, values: &[Self]) -> Self;
 }
 
 impl Summable for i64 {
@@ -116,6 +123,10 @@ impl Summable for i64 {
     fn sum_slice(values: &[Self]) -> Self {
         crate::exec::kernels::sum_i64(values)
     }
+
+    fn sum_slice_with(kernel: crate::exec::kernels::Kernel, values: &[Self]) -> Self {
+        crate::exec::kernels::sum_i64_with(kernel, values)
+    }
 }
 
 impl Summable for f64 {
@@ -129,6 +140,10 @@ impl Summable for f64 {
 
     fn sum_slice(values: &[Self]) -> Self {
         crate::exec::kernels::sum_f64(values)
+    }
+
+    fn sum_slice_with(kernel: crate::exec::kernels::Kernel, values: &[Self]) -> Self {
+        crate::exec::kernels::sum_f64_with(kernel, values)
     }
 }
 

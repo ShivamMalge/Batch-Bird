@@ -16,7 +16,7 @@
 use crate::error::{Error, Result};
 use crate::exec::{
     Aggregate, Filter, FilterKind, GroupKind, Operator, Project, Scan, SortAggregate,
-    SumAccumulator,
+    SortAlgorithm, SumAccumulator,
 };
 use crate::plan::logical::{CompareOp, Literal, LogicalPlan};
 use crate::storage::{Column, Table};
@@ -38,6 +38,11 @@ pub enum GroupStrategy {
     /// Sort by key, then reduce contiguous runs. O(n log n), O(rows) memory, and the only path
     /// on which the SIMD sum kernel reaches a real query.
     Sort,
+    /// The same strategy with an LSD radix sort instead of a comparison sort.
+    ///
+    /// A benchmark axis, so that "sort-group loses" can be separated from "pdqsort on 16-byte
+    /// pairs loses" -- two different claims, only one of them interesting.
+    SortRadix,
 }
 
 /// A built, validated pipeline, specialized to the aggregated column's type and the group-by
@@ -124,21 +129,29 @@ pub fn build_with<'a>(
             value_column,
             output_column,
         )),
-        (GroupStrategy::Sort, ValueKind::Int64) => BatchPipeline::SortInt64(SortAggregate::new(
-            source,
-            group_columns,
-            group_kind,
-            value_column,
-            output_column,
-        )),
-        (GroupStrategy::Sort, ValueKind::Float64) => {
-            BatchPipeline::SortFloat64(SortAggregate::new(
-                source,
-                group_columns,
-                group_kind,
-                value_column,
-                output_column,
-            ))
+        (GroupStrategy::Sort | GroupStrategy::SortRadix, ValueKind::Int64) => {
+            BatchPipeline::SortInt64(
+                SortAggregate::new(
+                    source,
+                    group_columns,
+                    group_kind,
+                    value_column,
+                    output_column,
+                )
+                .with_algorithm(sort_algorithm(strategy)),
+            )
+        }
+        (GroupStrategy::Sort | GroupStrategy::SortRadix, ValueKind::Float64) => {
+            BatchPipeline::SortFloat64(
+                SortAggregate::new(
+                    source,
+                    group_columns,
+                    group_kind,
+                    value_column,
+                    output_column,
+                )
+                .with_algorithm(sort_algorithm(strategy)),
+            )
         }
     })
 }
@@ -156,6 +169,14 @@ pub fn batch_query_with(
     strategy: GroupStrategy,
 ) -> Result<Table> {
     build_with(table, plan, strategy)?.execute()
+}
+
+/// Which sort a strategy implies.
+fn sort_algorithm(strategy: GroupStrategy) -> SortAlgorithm {
+    match strategy {
+        GroupStrategy::SortRadix => SortAlgorithm::Radix,
+        _ => SortAlgorithm::Comparison,
+    }
 }
 
 enum ValueKind {

@@ -67,8 +67,15 @@ pub struct SortAggregate<I, T> {
     sorted_keys: Vec<GroupKey>,
     sorted_values: Vec<T>,
 
+    /// Ping-pong buffer for the radix sort. Held on the struct so repeated sorts reuse one
+    /// allocation rather than making the allocator part of what is being measured.
+    scratch: Vec<(GroupKey, T)>,
+
     dictionary: Arc<[String]>,
     drained: bool,
+
+    /// Which sort `finish` runs. A benchmark axis; the engine's default is `Comparison`.
+    algorithm: SortAlgorithm,
 }
 
 impl<I: Operator, T: Summable> SortAggregate<I, T> {
@@ -94,9 +101,17 @@ impl<I: Operator, T: Summable> SortAggregate<I, T> {
             pairs: Vec::new(),
             sorted_keys: Vec::new(),
             sorted_values: Vec::new(),
+            scratch: Vec::new(),
             dictionary: Vec::new().into(),
             drained: false,
+            algorithm: SortAlgorithm::default(),
         }
+    }
+
+    /// Choose the sort. Only the benchmark calls this; see [`SortAlgorithm`].
+    pub fn with_algorithm(mut self, algorithm: SortAlgorithm) -> Self {
+        self.algorithm = algorithm;
+        self
     }
 
     /// **Phase 1.** Append this batch's `(key, value)` pairs.
@@ -141,7 +156,19 @@ impl<I: Operator, T: Summable> SortAggregate<I, T> {
     ///
     /// The split is what makes phase 3 vectorizable; see the module docs.
     pub fn sort_pairs(&mut self) {
-        self.pairs.sort_unstable_by_key(|(key, _)| key.0);
+        self.sort_pairs_with(SortAlgorithm::default());
+    }
+
+    /// Sort with an explicitly chosen algorithm.
+    ///
+    /// Exists so the benchmark can answer a question the default alone cannot: is "sort-group
+    /// loses" a statement about *sort-based grouping*, or about *pdqsort on 16-byte pairs*?
+    /// Those are different claims and only one of them is interesting.
+    pub fn sort_pairs_with(&mut self, algorithm: SortAlgorithm) {
+        match algorithm {
+            SortAlgorithm::Comparison => self.pairs.sort_unstable_by_key(|(key, _)| key.0),
+            SortAlgorithm::Radix => radix_sort_pairs(&mut self.pairs, &mut self.scratch),
+        }
 
         self.sorted_keys.clear();
         self.sorted_values.clear();
@@ -164,6 +191,10 @@ impl<I: Operator, T: Summable> SortAggregate<I, T> {
     ///
     /// Takes `&self` so the benchmark can time it repeatedly without re-sorting.
     pub fn aggregate_runs(&self) -> (Vec<GroupKey>, Vec<T>) {
+        // Read once for the whole aggregation, not once per run. Without the
+        // `bench-dispatch` feature this folds to a constant and the match below disappears.
+        let kernel = crate::exec::kernels::active_kernel();
+
         let mut keys = Vec::new();
         let mut totals = Vec::new();
 
@@ -176,7 +207,7 @@ impl<I: Operator, T: Summable> SortAggregate<I, T> {
             }
 
             keys.push(key);
-            totals.push(T::sum_slice(&self.sorted_values[start..end]));
+            totals.push(T::sum_slice_with(kernel, &self.sorted_values[start..end]));
             start = end;
         }
 
@@ -190,7 +221,7 @@ impl<I: Operator, T: Summable> SortAggregate<I, T> {
     }
 
     fn finish(&mut self) -> RecordBatch {
-        self.sort_pairs();
+        self.sort_pairs_with(self.algorithm);
         let (keys, totals) = self.aggregate_runs();
 
         let group_column = match self.group_kind {
@@ -225,6 +256,79 @@ impl<I: Operator, T: Summable> Operator for SortAggregate<I, T> {
         self.drained = true;
 
         Some(self.finish())
+    }
+}
+
+/// Which sort to use inside [`SortAggregate::sort_pairs_with`].
+///
+/// A benchmark axis, not a query option. The engine always uses the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortAlgorithm {
+    /// `sort_unstable_by_key`, Rust's pdqsort. O(n log n) comparisons.
+    #[default]
+    Comparison,
+    /// LSD radix, O(n * passes) with the pass count adapted to the largest key present.
+    Radix,
+}
+
+/// Least-significant-digit radix sort on the `u64` key, 8 bits per pass.
+///
+/// # Why this is worth having
+/// The interesting claim is about *sort-based grouping*, and a comparison sort would have let
+/// `O(n log n)` stand in for it. Group keys here are `u64` — dictionary codes or bit-cast
+/// `i64` — which is exactly the shape radix handles in `O(n)`. Without this, "sort-group
+/// loses" could not be separated from "pdqsort on 16-byte pairs loses".
+///
+/// # Passes are adapted to the data
+/// Only bytes up to the largest key present are processed. Dictionary codes for 250k groups
+/// occupy three bytes, so this makes three passes rather than eight — the difference between
+/// competitive and hopeless, and it costs one scan to discover.
+///
+/// Stable by construction, which the run-length aggregation downstream does not require but
+/// which makes the result identical to the comparison sort's on equal keys.
+fn radix_sort_pairs<T: Copy>(pairs: &mut Vec<(GroupKey, T)>, scratch: &mut Vec<(GroupKey, T)>) {
+    if pairs.len() < 2 {
+        return;
+    }
+
+    let max_key = pairs.iter().map(|(key, _)| key.0).max().unwrap_or(0);
+    let passes = if max_key == 0 {
+        1
+    } else {
+        (64 - max_key.leading_zeros()).div_ceil(8) as usize
+    };
+
+    scratch.clear();
+    scratch.resize(pairs.len(), pairs[0]);
+
+    let mut counts = [0usize; 256];
+    for pass in 0..passes {
+        let shift = pass * 8;
+
+        counts.fill(0);
+        for (key, _) in pairs.iter() {
+            counts[((key.0 >> shift) & 0xFF) as usize] += 1;
+        }
+
+        // A pass whose digit is constant would only copy the data back and forth.
+        if counts.contains(&pairs.len()) {
+            continue;
+        }
+
+        let mut offset = 0;
+        for count in counts.iter_mut() {
+            let current = *count;
+            *count = offset;
+            offset += current;
+        }
+
+        for pair in pairs.iter() {
+            let digit = ((pair.0.0 >> shift) & 0xFF) as usize;
+            scratch[counts[digit]] = *pair;
+            counts[digit] += 1;
+        }
+
+        std::mem::swap(pairs, scratch);
     }
 }
 
@@ -436,6 +540,63 @@ mod tests {
             .iter()
             .sum();
         assert_eq!(sums, (0..50i64).map(|i| i * 2).sum::<i64>());
+    }
+
+    #[test]
+    fn radix_and_comparison_sorts_agree() {
+        // The radix path is new correctness surface, and its adaptive pass count means the
+        // number of passes depends on the data -- so the cases below span one byte, three
+        // bytes, and the full eight.
+        for max_key in [0u64, 1, 255, 256, 250_000, u64::MAX] {
+            for len in [0usize, 1, 2, 17, 1000] {
+                let mut rng = crate::bench::data::Rng::new(0xC0FFEE ^ max_key ^ len as u64);
+                let pairs: Vec<(GroupKey, i64)> = (0..len)
+                    .map(|i| {
+                        let key = if max_key == 0 {
+                            0
+                        } else {
+                            rng.next_u64() % max_key.max(1)
+                        };
+                        (GroupKey(key), i as i64)
+                    })
+                    .collect();
+
+                let mut expected = pairs.clone();
+                expected.sort_by_key(|(key, _)| key.0);
+
+                let mut actual = pairs;
+                let mut scratch = Vec::new();
+                radix_sort_pairs(&mut actual, &mut scratch);
+
+                assert_eq!(
+                    actual, expected,
+                    "max_key {max_key}, len {len}: radix disagrees with a comparison sort"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn both_algorithms_produce_the_same_aggregate() {
+        // What actually matters: the strategy's answer must not depend on which sort ran.
+        let table = table(ROWS);
+        let mut results = Vec::new();
+
+        for algorithm in [SortAlgorithm::Comparison, SortAlgorithm::Radix] {
+            let mut agg = sort_agg(&table, "region", GroupKind::Utf8, "amount", 2);
+            let mut scan =
+                Scan::with_batch_size(&table, vec!["region".to_string(), "amount".to_string()], 2);
+            while let Some(batch) = scan.next_batch() {
+                agg.collect_batch(&batch);
+            }
+            agg.sort_pairs_with(algorithm);
+            results.push(agg.aggregate_runs());
+        }
+
+        assert_eq!(
+            results[0], results[1],
+            "the sorts disagree on the aggregate"
+        );
     }
 
     #[test]

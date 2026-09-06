@@ -129,7 +129,9 @@ fn main() {
     println!("Scan copies every batch unconditionally before the filter runs, so the ends of");
     println!("this sweep are where copy-on-scan costs most relative to what it returns.");
     let table = generate(1_000_000, 128, SEED);
-    for fraction in [0.01, 0.10, 0.50, 0.90, 1.00] {
+    // 0% first: nothing survives, so what remains is the pure scan-plus-dispatch cost per
+    // row. That is the floor both row loops share, and the reason both gaps are lower bounds.
+    for fraction in [0.00, 0.01, 0.10, 0.50, 0.90, 1.00] {
         let plan = query(fraction);
         scalar_arms(
             &format!("selectivity {:.0}%", fraction * 100.0),
@@ -167,9 +169,16 @@ fn main() {
                     &batch_query_with(&table, &plan, GroupStrategy::Hash).expect("hash"),
                 )
             }),
-            Arm::new("sort", || {
+            Arm::new("sort/pdqsort", || {
                 result_checksum_of(
                     &batch_query_with(&table, &plan, GroupStrategy::Sort).expect("sort"),
+                )
+            }),
+            // Separates "sort-based grouping loses" from "pdqsort on 16-byte pairs loses".
+            // Only one of those is a claim about the strategy.
+            Arm::new("sort/radix", || {
+                result_checksum_of(
+                    &batch_query_with(&table, &plan, GroupStrategy::SortRadix).expect("radix"),
                 )
             }),
         ];
@@ -179,14 +188,86 @@ fn main() {
         report(&m);
         assert_eq!(m[0].checksum, m[1].checksum, "strategies disagree");
 
-        let ratio = m[1].min() / m[0].min();
-        let verdict = if (ratio - 1.0).abs() * 100.0 < HASH_SEED_VARIANCE {
-            "within hash's seed variance -- not separable"
-        } else if ratio < 1.0 {
-            "sort wins"
-        } else {
-            "hash wins"
-        };
-        println!("  sort/hash: {ratio:.2}x   {verdict}");
+        for candidate in &m[1..] {
+            let ratio = candidate.min() / m[0].min();
+            let verdict = if (ratio - 1.0).abs() * 100.0 < HASH_SEED_VARIANCE {
+                "within hash's seed variance -- not separable"
+            } else if ratio < 1.0 {
+                "beats hash"
+            } else {
+                "hash wins"
+            };
+            println!("  {:<14} vs hash: {ratio:.2}x   {verdict}", candidate.name);
+        }
     }
+
+    simd_arms();
+}
+
+/// Scalar vs SIMD, alternated inside one process.
+///
+/// The only way to compare them honestly: across `cargo` invocations the two configurations
+/// differ by more than the effect, and a control gate caught benchmarks with no vector code
+/// moving 5-12% purely from the toolchain and run-to-run drift.
+#[cfg(feature = "bench-dispatch")]
+fn simd_arms() {
+    use batchbird::exec::kernels::{Kernel, dispatch};
+
+    println!(
+        "
+
+=== scalar vs SIMD (alternated in-process, 1M rows, 50% selectivity) ==="
+    );
+    println!("The filter kernel runs on every arm; the sum kernel reaches a query only through");
+    println!("sort-group, whose run length is rows/cardinality -- see the recorded prediction.");
+
+    let plan = query(0.5);
+    for cardinality in [8u64, 2_048, 250_000] {
+        let table = generate(1_000_000, cardinality, SEED);
+
+        for (label, strategy) in [
+            ("hash", GroupStrategy::Hash),
+            ("sort/radix", GroupStrategy::SortRadix),
+        ] {
+            let arms = vec![
+                Arm::new("scalar", || {
+                    dispatch::set(Kernel::Scalar);
+                    result_checksum_of(&batch_query_with(&table, &plan, strategy).expect("q"))
+                }),
+                Arm::new("simd", || {
+                    dispatch::set(Kernel::Simd);
+                    result_checksum_of(&batch_query_with(&table, &plan, strategy).expect("q"))
+                }),
+            ];
+
+            let m = alternate(arms, SAMPLES, WARMUP);
+            println!(
+                "
+cardinality {cardinality}, {label}"
+            );
+            report(&m);
+            assert_eq!(
+                m[0].checksum, m[1].checksum,
+                "kernels disagree on the answer"
+            );
+
+            let speedup = m[0].min() / m[1].min();
+            let resolved = if (speedup - 1.0).abs() * 100.0 < RESOLUTION_WORST {
+                "  <- below resolution, no effect"
+            } else {
+                ""
+            };
+            println!("  simd speedup: {speedup:.3}x{resolved}");
+        }
+    }
+}
+
+#[cfg(not(feature = "bench-dispatch"))]
+fn simd_arms() {
+    println!(
+        "
+
+=== scalar vs SIMD ===
+Skipped: build with          `cargo +nightly run --release --example measure --features bench-dispatch`."
+    );
 }

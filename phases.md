@@ -277,8 +277,8 @@ Decisions made here that the design docs did not cover:
   than it appears to. Worth a line in the Phase 7 write-up.
 
 ## Phase 6 — Sort-Based Grouping + Full Benchmark Suite
-**Status:** 🟡 in progress — scalar arms measured and recorded; SIMD dispatch restructure
-outstanding. 147 tests on stable, 158 on nightly + `--features simd`, 12 parity, clippy and
+**Status:** ✅ done (2026-09-06) — all arms and both strategies measured through the
+in-process alternating harness. 147 tests on stable, 158 on nightly + `--features simd`, 12 parity, clippy and
 rustfmt clean, CI green.
 
 ### What landed
@@ -365,9 +365,11 @@ at **0.75–1.4 GB/s against a ~20 GB/s ceiling** demonstrated by the Phase 5 su
 of achievable bandwidth, working-set size simply is not a variable. An earlier note calling
 this "bandwidth-bound" was wrong by an order of magnitude and is struck.
 
-**The gaps, stable across 32x scale:** layout **~1.7x**, execution model **~1.4x**. Both far
-above resolution, and both *higher and tighter* than the retracted cross-run numbers (1.21–1.44x
-and 1.19–1.52x), which understated the layout effect and scattered the execution effect.
+**The gaps, stable across 32x scale:** row-vs-columnar **~1.7x**, execution model **~1.4x**.
+Both far above resolution, and both *higher and tighter* than the retracted cross-run numbers.
+
+⚠️ **The ~1.7x is mislabelled if called a layout gap.** See "What actually causes it" below: a
+controlled probe shows pure layout contributes almost none of it at this row width.
 
 **Selectivity (1M rows, cardinality 128).**
 
@@ -431,12 +433,95 @@ winner inside it.
 14.08 ns/row) while the ratios moved 2–3% (layout 1.71 → 1.67x, execution 1.40 → 1.44x). Drift
 lands on both arms and cancels in the ratio, which is the whole reason for alternating.
 
+### What actually causes the row-vs-columnar gap — it is not cache lines
+
+Bandwidth was struck, so the gap needed a mechanism. `examples/layout_probe.rs` tests the
+remaining candidate on one axis: **pad the row struct while holding the field count fixed**, so
+only the bytes dragged along with each read change. Same three fields, same predicate, same
+grouping, same data. 2M rows, cardinality 128.
+
+| row width | lines/1k rows | row | columnar | gap |
+|---|---|---|---|---|
+| 24 B | 375 | 8.64 ns | 9.67 | **0.89x** |
+| 32 B | 500 | 8.87 | 9.57 | **0.93x** |
+| 48 B | 750 | 9.11 | 9.94 | 0.92x |
+| 80 B | 1250 | 10.48 | 9.58 | 1.09x |
+| 144 B | 2250 | 14.28 | 10.01 | 1.43x |
+
+Two things fall out, and both were surprises:
+
+1. **Cache-line utilization is real but weak and sub-linear** — 6x the width buys 1.65x the
+   cost, not 6x. Prefetchers hide most of a wider stride.
+2. **Below ~64 B per row, the row layout is *faster* than columnar** (0.89–0.93x). One
+   sequential stream beats three: the columnar loop walks three independent arrays, each
+   consuming its own prefetch stream and TLB entries.
+
+The engine's row struct is **32 B**, where the probe reports **0.93x** — and yet the engine's
+row arm measures **1.67x**. The probe differs in exactly one thing: its group key is a `u32`,
+where the engine's is a `Box<str>`. So the missing ~1.8x is **dictionary encoding** — string
+hashing plus a pointer chase per row — not memory layout.
+
+The cardinality sweep corroborates it independently: the gap explodes 1.61x → 8.97x as distinct
+values grow, which is what string-hashing cost does and what cache-line utilization does not.
+
+**Correction for Phase 7: what this project has been calling a "layout gap" is overwhelmingly a
+dictionary-encoding gap**, with a width-dependent layout component that is near zero at
+realistic row widths and only becomes visible past ~64 B. The columnar thesis is still supported
+here, but by dictionary encoding rather than by cache-line packing — and that is a different
+claim which the write-up must make in those terms.
+
+### The shared per-row floor, re-derived clean
+
+The earlier ~5 ns/row estimate came from the retracted data. Re-measured through the harness at
+**0% selectivity**, where nothing survives and what remains is pure scan-plus-dispatch:
+
+| arm | ns/row |
+|---|---|
+| row-oriented | 2.38 |
+| columnar-naive | 2.59 |
+| batched | 2.09 |
+
+**~2.5 ns/row, not ~5.** So both gaps were *less* understated than previously claimed.
+Correcting the columnar-naive comparison for the shared floor moves it from 1.67x to ~1.82x.
+
+### Scoping the sort conclusion: it is about the strategy, not about pdqsort
+
+`systemDesign.md` predicted sort-group loses at this scale. To say whether that is a claim about
+sort-based grouping or merely about `sort_unstable_by_key` on 16-byte pairs, an **LSD radix
+sort** was implemented (`SortAlgorithm::Radix`, adaptive pass count — 250k dictionary codes span
+three bytes, so three passes rather than eight). Alternated against hash in one run:
+
+| cardinality | hash | sort/pdqsort | sort/radix |
+|---|---|---|---|
+| 8 | 10.706 ms | 1.90x | 2.25x |
+| 2,048 | 12.348 | 2.30x | 2.44x |
+| 32,768 | 23.323 | 1.71x | **1.31x** |
+| 250,000 | 91.377 | **0.77x** | **0.68x** |
+
+**The conclusion is about sort-based grouping.** Radix does not rescue it at low cardinality —
+it is *worse* there than pdqsort, whose three-way partitioning handles heavy duplication well —
+and it does not change the direction of any verdict. It does what an O(n) sort should: its
+advantage grows with cardinality, improving 1.71x → 1.31x at 32k and 0.77x → 0.68x at 250k.
+
+⚠️ **This refutes systemDesign.md's prediction at high cardinality.** At 250k groups sort-group
+**beats** hash-group — by 0.68–0.77x here, and 0.76–0.90x across three alternated runs. The
+direction is consistent in every run; the magnitude is not, because hash at 250k carries genuine
+per-process placement variance for its 250k-entry table that in-process alternation cannot
+remove. Report the range, not a point. Below 32k cardinality the prediction holds and hash wins
+by 1.3–2.4x.
+
+The mechanism is the one the phase breakdown showed: hash's scatter-accumulate degrades as the
+group table leaves cache, while a sort stays sequential. This is why production engines switch
+to sort-based or partitioned aggregation at high cardinality.
+
 ### Caveats the write-up must carry
-- **Both gaps are lower bounds.** The two row loops share a per-row enum-dispatch floor of
-  ~5 ns/row that is layout-independent, so it inflates numerator and denominator alike and
-  pulls every ratio toward 1.0. Measured at 1% selectivity, where the row store moves 4x the
-  bytes (32 MB vs 8 MB) in the same wall time — neither arm is memory-bound there. The naive
-  baseline is **not** optimized to fix this: it is the control (`agents.md`).
+- **Both gaps are lower bounds.** The arms share a per-row dispatch floor of **~2.5 ns/row**
+  (re-derived above at 0% selectivity), which is independent of layout and strategy and so
+  pulls every ratio toward 1.0. Correcting for it moves the row-vs-columnar figure from 1.67x
+  to ~1.82x. The naive baseline is **not** optimized to fix this: it is the control
+  (`agents.md`).
+- **"Layout gap" is the wrong name for it** and must not reach Phase 7 unqualified. The probe
+  above attributes almost all of it to dictionary encoding rather than to memory layout.
 - **The row struct is 32 B** and stores `amount` twice, since this query filters and sums the
   same column. A realistic row store would carry all four columns inline at 40 B, so the arm
   understates rather than inflates the row-oriented penalty.
@@ -461,14 +546,46 @@ length, which is `surviving rows / cardinality`. That puts the two ends in a vic
   Phase 5 applies only to `aggregate-runs`, which is 0.5 ms of a 19-25 ms strategy.
 
 So the sum kernel is fast exactly where there is nothing to sum, and useless exactly where it
-would have mattered. Confirm or refute reported below.
+would have mattered.
+
+**Verdict: CONFIRMED, and more broadly than predicted.** Scalar vs SIMD alternated in-process,
+1M rows, 50% selectivity:
+
+| cardinality | strategy | scalar | SIMD | speedup |
+|---|---|---|---|---|
+| 8 | hash | 11.111 ms | 10.870 | 1.022x |
+| 8 | sort/radix | 23.907 | 24.036 | 0.995x |
+| 2,048 | hash | 12.246 | 11.704 | 1.046x |
+| 2,048 | sort/radix | 27.384 | 26.809 | 1.021x |
+| 250,000 | hash | 102.991 | 100.220 | 1.028x |
+| 250,000 | sort/radix | 59.547 | 63.386 | 0.939x |
+
+No cardinality where sort+SIMD beats hash. But the stronger result is that **SIMD does nothing
+measurable at query level anywhere** — every figure sits in 0.94–1.05x, inside the 5.68%
+resolution, including on the hash path where the filter kernel runs on every batch.
+
+That is not a contradiction of Phase 5. Those kernels really are 1.46x, 1.59x and 3.81x faster
+in isolation, measured the same way. It is Amdahl arithmetic: the kernels are a small slice of a
+query that also hashes, allocates, compacts and scatters, and speeding up a slice that small
+cannot move the total. **The honest headline is that vectorizing the two hot loops this engine
+has does not make its queries faster** — which is a more useful finding than a speedup, and only
+visible because the query-level number was measured instead of extrapolated from the kernel.
+
+### SIMD dispatch, as built
+`bench-dispatch` (implying `simd`) selects the kernel through an atomic so one process can
+alternate scalar and SIMD sample by sample. The branch resolves **per kernel call, never per
+row**: filter kernels branch once per batch, and `aggregate_runs` reads the mode once per
+aggregation rather than once per run, because at 250k groups a run is ~2 rows and per-run
+dispatch would sit close enough to per-row to contaminate the measurement. Without the feature
+`active_kernel()` is `const`-foldable, the match compiles away, and the default build carries no
+runtime branch.
+
+Resolution was re-established after the change rather than assumed: **A/A median 1.56%, worst
+5.68%**, against 1.57%/5.45% before it. The runtime branch costs no resolution.
 
 ### Outstanding
-- SIMD dispatch restructure: runtime selection behind a bench-only feature, resolved **per
-  kernel call, never per row**; default build keeps `cfg` dispatch and zero runtime branch.
-- Re-measure the SIMD arm through the alternating harness once that lands.
 - Restore the power scheme (Balanced, `381b4222-f694-41f0-9685-ff5bb260df2e`, unrestricted
-  processor state) when Phase 6 measurement is finished.
+  processor state). Phase 6 measurement is complete.
 
 ## Phase 7 — Write-Up
 **Status:** not started

@@ -1,0 +1,30 @@
+-- detected ------------------------------------------------
+         os:          windows / x86_64
+         cpu:         AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD
+         rustc:       rustc 1.94.0 (4a4ef493e 2026-03-02)
+         profile:     release, codegen-units=1, lto=thin, debug=true
+         simd:        on (std::simd kernels)
+         data seed:   0xba7cb12d
+         hasher seed: 0xba7cb18d00000001  (fixed; see crate::hash)
+         -- declared -----------------------------------------------
+         power: Balanced + PROCTHROTTLEMIN/MAX 99%; affinity: core 0; estimator: min-of-N; alternating in-process; bench-dispatch runtime kernel selection
+
+Layout probe: 2000000 rows, cardinality 128, 50% selectivity.
+Three fields read in every case; only the dead padding between rows changes.
+The columnar arm is identical across rows -- it has no padding to grow.
+
+  width      cache lines touched per 1000 rows scanned
+    24 B/row     375 lines/1k rows   row   8.64 ns   columnar   9.67 ns   gap 0.89x
+    32 B/row     500 lines/1k rows   row   8.87 ns   columnar   9.57 ns   gap 0.93x
+    48 B/row     750 lines/1k rows   row   9.11 ns   columnar   9.94 ns   gap 0.92x
+    80 B/row    1250 lines/1k rows   row  10.48 ns   columnar   9.58 ns   gap 1.09x
+   144 B/row    2250 lines/1k rows   row  14.28 ns   columnar  10.01 ns   gap 1.43x
+
+=== reading the result ===
+row width grew 6.0x (24 -> 144 B); row-arm cost grew 1.65x
+layout gap went 0.89x -> 1.43x
+
+If cost tracks width, cache-line utilization is the mechanism: the loop reads the
+same three fields either way, so only the bytes dragged along with them changed.
+If cost is flat, width is not what the row arm is paying for, and the gap needs
+another explanation before Phase 7 can claim one.

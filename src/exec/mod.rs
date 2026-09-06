@@ -36,7 +36,7 @@ pub use bitset::Bitset;
 pub use filter::{Filter, FilterKind};
 pub use project::Project;
 pub use scan::Scan;
-pub use sort_aggregate::SortAggregate;
+pub use sort_aggregate::{SortAggregate, SortAlgorithm};
 
 /// Rows per batch.
 ///

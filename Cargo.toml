@@ -14,6 +14,13 @@ publish = false
 # See techstack.md "Language / Toolchain" and phases.md Phase 5.
 simd = []
 
+# Runtime kernel selection, for benchmarking only. Lets one process alternate scalar and SIMD
+# sample by sample, which is the only way to compare them without inter-run drift swamping the
+# effect (see src/bench/harness.rs). Implies `simd` because it needs the vector kernels
+# compiled in. NOT for the default build: without it, kernel choice is resolved at compile time
+# and there is no runtime branch at all.
+bench-dispatch = ["simd"]
+
 [dependencies]
 csv = "1.4.0"
 # Fast hasher: std's SipHash would dominate the build-group-index phase timing and distort

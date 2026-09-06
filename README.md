@@ -54,33 +54,52 @@ tolerance for floats, because floating-point addition is not associative.
 
 ## Findings so far
 
-Measured on this project's own hardware; see `phases.md` for machine and toolchain details.
+Measured on an AMD Ryzen 7 5800HS, pinned to one core with boost disabled, arms alternated
+inside a single process and reported as minimum-of-N. The harness's own resolution is measured,
+not assumed: an A/A null (the same arm registered twice) returns **median 1.56%, worst 5.68%**,
+and nothing smaller than that is reported as an effect. Full detail in `phases.md`; raw output
+in `results/`.
 
-**SIMD kernels, 16M rows:**
+**SIMD kernels are fast in isolation and invisible at query level.**
 
-| kernel | scalar | SIMD | speedup |
+| kernel, 16M rows | scalar | SIMD | speedup |
 |---|---|---|---|
 | filter compare, Int64 | 18.87 ms | 12.89 ms | 1.46× |
 | filter compare, Float64 | 13.68 ms | 8.61 ms | 1.59× |
-| sum reduction, Int64 | 6.80 ms | 6.38 ms | **1.07×** |
+| sum reduction, Int64 | 6.80 ms | 6.38 ms | 1.07× |
 | sum reduction, Float64 | 24.85 ms | 6.52 ms | **3.81×** |
 
-The two sum rows look contradictory and share one explanation. Integer addition is
-associative, so LLVM was already free to auto-vectorize the scalar `i64` loop and did —
-leaving nothing for a hand-written version to win. Floating-point addition is *not*, so the
-compiler must preserve serial order; writing `Simd<f64, 8>` accumulation is precisely the act
-of granting permission to reorder. Both SIMD sums then land at the same wall time for the same
-128 MB, consistent with a shared memory-bandwidth ceiling the `i64` loop had already reached.
+Yet running whole queries with the same kernels, alternated scalar against SIMD in one process:
+every speedup lands in **0.94–1.05×** — inside the noise floor, at every cardinality, for both
+group-by strategies. The kernels are a small slice of a query that also hashes, allocates,
+compacts and scatters, and Amdahl does the rest. **Vectorizing the two hot loops this engine has
+does not make its queries faster.** That is the finding, and it is only visible because the
+query-level number was measured rather than extrapolated from the kernel.
 
-The same property drives both halves: non-associativity is why the `f64` sum needs a test
-tolerance, and why it is the one with a speedup to win.
+The two sum rows explain each other. Integer addition is associative, so LLVM already
+auto-vectorized the scalar `i64` loop — nothing left to win. Floating-point addition is not, so
+the compiler must preserve serial order; writing `Simd<f64, 8>` is precisely the act of granting
+permission to reorder. Both SIMD sums then land at the same wall time for the same 128 MB,
+against a shared memory-bandwidth ceiling of ~20 GB/s.
 
-**A bug the benchmark caught.** `Column::Utf8Dict` originally owned its dictionary, so every
-`RecordBatch` cloned it — twice, at `Scan` and at `Filter` compaction. Over 2M rows the batch
-pipeline degraded from 0.80× to **84×** *slower* than the row loop as group cardinality went
-8 → 10,000, while an `Int64` group column over identical data stayed flat at ~1.1×. Sharing
-the dictionary behind an `Arc` fixed it; both now sit at ~0.70×. The failure was invisible at
-low cardinality — exactly where a casual benchmark would have looked.
+**Row-oriented vs columnar is mostly dictionary encoding, not memory layout.** The row arm is
+~1.7× slower at fixed cardinality. A controlled probe — padding the row struct from 24 B to
+144 B while reading the same three fields — shows cache-line utilization is real but weak
+(6× the width buys 1.65× the cost), and that **below ~64 B per row the row layout is actually
+faster** than columnar, because one sequential stream beats three. At the engine's 32 B row the
+probe reports 0.93×, against the engine's 1.67×. The difference is the group key: a `Box<str>`
+with a pointer chase and string hash per row, versus a `u32` dictionary code.
+
+**Sort-based grouping beats hash at high cardinality**, refuting this project's own design-doc
+prediction. Below 32k groups hash wins by 1.3–2.4×; at 250k groups sort wins by 0.68–0.90×
+across runs. An LSD radix sort was implemented specifically to check whether "sort loses" was a
+statement about the strategy or about pdqsort — it is about the strategy: radix does not change
+any verdict's direction, though its advantage grows with cardinality as an O(n) sort should.
+
+**Hash group-by carries a variance that sort does not.** Five fixed hasher seeds span **10.7%**
+at 250k cardinality — the same order as the effects under study — purely from collision pattern.
+A sort has no collision pattern and no such component. Every hash figure above is read with that
+band, and comparisons falling inside it are reported as not separable rather than as results.
 
 ## Layout
 

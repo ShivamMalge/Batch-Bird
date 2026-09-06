@@ -30,6 +30,89 @@
 use crate::exec::bitset::Bitset;
 use crate::plan::CompareOp;
 
+/// Which implementation of a kernel to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kernel {
+    Scalar,
+    Simd,
+}
+
+impl Kernel {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kernel::Scalar => "scalar",
+            Kernel::Simd => "simd",
+        }
+    }
+}
+
+/// Runtime kernel selection, compiled in only under the `bench-dispatch` feature.
+///
+/// # Why this exists
+/// Comparing scalar against SIMD across two `cargo` invocations was measured and found
+/// unusable: two runs of an *identical* binary on identical data differ by a median of 7.5%,
+/// which is larger than the effect. The only reliable comparison alternates the two inside one
+/// process, sample by sample — and that requires choosing the kernel at runtime.
+///
+/// # What it costs, and where
+/// The branch is resolved **per kernel call**, never per row. A kernel call processes a whole
+/// batch (filter) or a whole run (sum), so the cost is one relaxed atomic load amortized over
+/// hundreds or thousands of elements. `SortAggregate::aggregate_runs` hoists it further,
+/// reading the mode once for the entire aggregation rather than once per run, because at high
+/// cardinality runs are only a couple of rows long and per-run overhead would land close
+/// enough to per-row to matter.
+///
+/// Without the feature, [`active_kernel`] is a `const`-foldable function returning whatever
+/// `cfg` selected, so the match compiles away entirely and the default build carries **no
+/// runtime branch**.
+#[cfg(feature = "bench-dispatch")]
+pub mod dispatch {
+    use super::Kernel;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    static ACTIVE: AtomicU8 = AtomicU8::new(1);
+
+    /// Select the kernel every subsequent call will use.
+    pub fn set(kernel: Kernel) {
+        ACTIVE.store(
+            match kernel {
+                Kernel::Scalar => 0,
+                Kernel::Simd => 1,
+            },
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Relaxed because this is read far more often than written, and a stale read is
+    /// impossible in practice: the benchmark sets the mode, then runs, single-threaded.
+    #[inline]
+    pub fn get() -> Kernel {
+        match ACTIVE.load(Ordering::Relaxed) {
+            0 => Kernel::Scalar,
+            _ => Kernel::Simd,
+        }
+    }
+}
+
+/// The kernel to run right now.
+#[cfg(feature = "bench-dispatch")]
+#[inline]
+pub fn active_kernel() -> Kernel {
+    dispatch::get()
+}
+
+/// Compile-time selection: the default. Folds to a constant, so every `match` on it
+/// disappears and the chosen kernel is called directly.
+#[cfg(not(feature = "bench-dispatch"))]
+#[inline(always)]
+pub fn active_kernel() -> Kernel {
+    if cfg!(feature = "simd") {
+        Kernel::Simd
+    } else {
+        Kernel::Scalar
+    }
+}
+
 #[inline]
 pub fn compare<T: PartialOrd + ?Sized>(a: &T, b: &T, op: CompareOp) -> bool {
     match op {
@@ -87,24 +170,31 @@ pub fn sum_f64_scalar(values: &[f64]) -> f64 {
 // ---- Dispatch: the only place the feature flag changes behaviour --------------------
 
 pub fn mask_i64(values: &[i64], op: CompareOp, literal: i64) -> Bitset {
-    #[cfg(feature = "simd")]
-    {
-        crate::simd::mask_i64_simd(values, op, literal)
-    }
-    #[cfg(not(feature = "simd"))]
-    {
-        mask_i64_scalar(values, op, literal)
+    mask_i64_with(active_kernel(), values, op, literal)
+}
+
+/// One branch per call, outside the row loop the kernel then runs.
+pub fn mask_i64_with(kernel: Kernel, values: &[i64], op: CompareOp, literal: i64) -> Bitset {
+    match kernel {
+        Kernel::Scalar => mask_i64_scalar(values, op, literal),
+        #[cfg(feature = "simd")]
+        Kernel::Simd => crate::simd::mask_i64_simd(values, op, literal),
+        #[cfg(not(feature = "simd"))]
+        Kernel::Simd => unreachable!("SIMD kernels are not compiled into this build"),
     }
 }
 
 pub fn mask_f64(values: &[f64], op: CompareOp, literal: f64) -> Bitset {
-    #[cfg(feature = "simd")]
-    {
-        crate::simd::mask_f64_simd(values, op, literal)
-    }
-    #[cfg(not(feature = "simd"))]
-    {
-        mask_f64_scalar(values, op, literal)
+    mask_f64_with(active_kernel(), values, op, literal)
+}
+
+pub fn mask_f64_with(kernel: Kernel, values: &[f64], op: CompareOp, literal: f64) -> Bitset {
+    match kernel {
+        Kernel::Scalar => mask_f64_scalar(values, op, literal),
+        #[cfg(feature = "simd")]
+        Kernel::Simd => crate::simd::mask_f64_simd(values, op, literal),
+        #[cfg(not(feature = "simd"))]
+        Kernel::Simd => unreachable!("SIMD kernels are not compiled into this build"),
     }
 }
 
@@ -117,13 +207,16 @@ pub fn mask_f64(values: &[f64], op: CompareOp, literal: f64) -> Bitset {
 /// sort-group's aggregation phase beats hash-group's scatter -- and the reason the sort's
 /// `O(n log n)` may still lose overall.
 pub fn sum_i64(values: &[i64]) -> i64 {
-    #[cfg(feature = "simd")]
-    {
-        crate::simd::sum_i64_simd(values)
-    }
-    #[cfg(not(feature = "simd"))]
-    {
-        sum_i64_scalar(values)
+    sum_i64_with(active_kernel(), values)
+}
+
+pub fn sum_i64_with(kernel: Kernel, values: &[i64]) -> i64 {
+    match kernel {
+        Kernel::Scalar => sum_i64_scalar(values),
+        #[cfg(feature = "simd")]
+        Kernel::Simd => crate::simd::sum_i64_simd(values),
+        #[cfg(not(feature = "simd"))]
+        Kernel::Simd => unreachable!("SIMD kernels are not compiled into this build"),
     }
 }
 
@@ -136,13 +229,16 @@ pub fn sum_i64(values: &[i64]) -> i64 {
 /// Integer sums have no such caveat, which is why the tests below assert exact equality for
 /// `i64` and a relative tolerance for `f64`.
 pub fn sum_f64(values: &[f64]) -> f64 {
-    #[cfg(feature = "simd")]
-    {
-        crate::simd::sum_f64_simd(values)
-    }
-    #[cfg(not(feature = "simd"))]
-    {
-        sum_f64_scalar(values)
+    sum_f64_with(active_kernel(), values)
+}
+
+pub fn sum_f64_with(kernel: Kernel, values: &[f64]) -> f64 {
+    match kernel {
+        Kernel::Scalar => sum_f64_scalar(values),
+        #[cfg(feature = "simd")]
+        Kernel::Simd => crate::simd::sum_f64_simd(values),
+        #[cfg(not(feature = "simd"))]
+        Kernel::Simd => unreachable!("SIMD kernels are not compiled into this build"),
     }
 }
 

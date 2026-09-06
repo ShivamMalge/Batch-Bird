@@ -179,6 +179,10 @@ fn assert_parity(table: &Table, sql: &str) -> usize {
             "batched/sort",
             batch_query_with(table, &plan, GroupStrategy::Sort),
         ),
+        (
+            "batched/sort-radix",
+            batch_query_with(table, &plan, GroupStrategy::SortRadix),
+        ),
         ("row-oriented", row_query(table, &plan)),
     ];
 
@@ -455,11 +459,13 @@ fn both_engines_reject_the_same_invalid_plans() {
         let naive = naive_query(&table, &plan);
         let batched = batch_query(&table, &plan);
         let sorted = batch_query_with(&table, &plan, GroupStrategy::Sort);
+        let radix = batch_query_with(&table, &plan, GroupStrategy::SortRadix);
         let rows = row_query(&table, &plan);
 
         assert!(naive.is_err(), "naive accepted {sql:?}");
         assert!(batched.is_err(), "batched accepted {sql:?}");
         assert!(sorted.is_err(), "sort-group accepted {sql:?}");
+        assert!(radix.is_err(), "sort-radix accepted {sql:?}");
         assert!(rows.is_err(), "row-oriented accepted {sql:?}");
 
         // Identical messages, not merely identical failure: the three arms validate
