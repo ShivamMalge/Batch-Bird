@@ -16,8 +16,12 @@ Splitting it that way is the point: the gap between 1 and 2 is attributable to *
 layout*, and the gap between 2 and 3–4 to *execution model*. A benchmark that only compared
 row-loop-over-columns against batched-over-columns could not tell those apart.
 
-**The write-up is the deliverable, not the code.** The interesting output is an explanation of
-where SIMD helps, where it does not, and why.
+**The write-up is the deliverable, not the code:** [WRITEUP.md](WRITEUP.md) — where SIMD helps,
+where it does not, and why.
+
+Short version: the kernels are 1.46–3.81x faster in isolation and the queries are ~1.00x, and
+the Amdahl arithmetic predicts that to within 0.1 percentage points. Vectorizing the two hot
+loops this engine has does not make its queries faster.
 
 ## Supported query shape
 

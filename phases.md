@@ -588,11 +588,57 @@ Resolution was re-established after the change rather than assumed: **A/A median
   processor state). Phase 6 measurement is complete.
 
 ## Phase 7 — Write-Up
-**Status:** not started
-- Benchmark chart(s).
-- Explicit findings: where SIMD helps and where it doesn't, and why; hash-group vs.
-  sort-group tradeoff at benchmark scale; documented scope cuts (no joins, no multi-column
-  group-by, no SIMD on strings) stated as decisions, not omissions.
+**Status:** ✅ done (2026-09-06) — `WRITEUP.md`.
+
+Deliverable per prd.md: a written explanation of where SIMD helps, where it does not, and why.
+
+**The Amdahl argument was closed quantitatively** rather than left as prose. `examples/amdahl.rs`
+measures each kernel's share of query time using the phase decomposition already in place,
+computes the ceiling from that share plus the Phase 5 kernel speedups, and compares against the
+observed query-level figure — all three side by side, alternated in one process:
+
+| cardinality | filter share p | s | Amdahl ceiling | observed | agreement |
+|---|---|---|---|---|---|
+| 128 | 0.117 | 1.46x | 1.038x | 1.039x | **+0.1 pp** |
+| 250,000 | 0.016 | 1.46x | 1.005x | 0.982x | -2.3 pp |
+
+The null result now has a predictive model rather than an explanation after the fact: to get a
+1.3x query from a 1.46x kernel, that kernel would have to be ~90% of query time instead of 11.7%.
+
+Sum kernel, reachable only through sort-group: share 2.6% at cardinality 128 and 10.7% at 250k,
+against a 1.07x kernel — ceilings of 1.002x and 1.007x. Even at 10.7% share there is nothing to
+win, which is the quantitative form of "the sum kernel cannot pay".
+
+Conditions: A/A resolution re-established at **median 2.25%, worst 5.79%**; determinism canary
+green; pinned to core 0, processor state capped at 99%, min-of-N, alternated in-process. Power
+scheme restored to Balanced with unrestricted processor state afterwards.
+
+### Copy-on-scan: decided, deliberate scope cut
+Not implemented. Recorded with its measured cost rather than left implicit.
+
+Batched execution runs at **0.87-0.91x** the naive row loop below 10% selectivity — a net loss.
+`Scan` is 12.5% of query time at 50% selectivity; because its cost is independent of selectivity
+while everything downstream shrinks, at 1% selectivity it is roughly 30% of the query, and
+removing the write half of the copy would be worth about **1.18x** there — enough to turn that
+loss into roughly break-even.
+
+Cut because it changes a type pinned in architecture.md: a borrowing `RecordBatch` needs a
+lifetime that propagates onto the `Operator` trait and every operator, far larger than the
+one-field `Arc` amendment, and Phase 7 is a write-up phase with the engine feature-complete and
+green. **Stated as the known optimization most worth doing next, not as one that does not
+matter.**
+
+### Framing decisions in the write-up
+- Leads with prd.md's actual question — kernels 1.46-3.81x, queries ~1.00x, mechanism Amdahl.
+- The methodology rebuild is a trust-earning section (§6), not the narrative arc.
+- All four struck findings collected in one table (§5) with the control that caught each,
+  rather than scattered as hedges.
+- The relabelled gap stated precisely: columnar's advantage here comes from **encoding, not
+  cache-line utilization**, and dictionary encoding is itself a columnar technique a row store
+  cannot cheaply have. The sub-64 B inversion is scoped to a **three-column projection**, since
+  three arrays means three sequential streams and the crossover moves with column count.
+- Every number carries machine, toolchain, power scheme, pinning, estimator, resolution, and
+  both seeds.
 
 ## Explicit Non-Goals (do not implement without revisiting prd.md)
 - Joins, multi-column GROUP BY, full SQL surface, SIMD string matching.

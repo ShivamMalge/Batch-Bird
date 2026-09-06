@@ -51,3 +51,9 @@ harness = false
 [[bench]]
 name = "group_by"
 harness = false
+
+# Needs runtime kernel selection to alternate scalar against SIMD in one process, so it is
+# skipped by builds that do not enable it (including CI's stable job).
+[[example]]
+name = "amdahl"
+required-features = ["bench-dispatch"]

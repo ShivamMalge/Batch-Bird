@@ -7,7 +7,7 @@
          data seed:   0xba7cb12d
          hasher seed: 0xba7cb18d00000001  (fixed; see crate::hash)
          -- declared -----------------------------------------------
-         power: Balanced + PROCTHROTTLEMIN/MAX 99%; affinity: core 0; estimator: min-of-N; alternating in-process; bench-dispatch runtime kernel selection
+         power: Balanced + PROCTHROTTLEMIN/MAX 99%; affinity: core 0; estimator: min-of-N; alternating in-process; bench-dispatch
 
 A/A null: the same arm registered twice, alternated ABAB, 40 samples after 3 warmup rounds.
 True difference is zero; whatever appears is resolution.
@@ -16,44 +16,44 @@ True difference is zero; whatever appears is resolution.
 
 cardinality 8
   arm                            min    median       max   spread  vs first
-  A                          14.393   17.837   26.651    85.2%    1.000x
-  A'                         14.366   17.205   26.761    86.3%    0.998x
-  A/A delta on min: 0.19%
+  A                          14.294   15.073   19.880    39.1%    1.000x
+  A'                         13.980   14.990   17.775    27.1%    0.978x
+  A/A delta on min: 2.25%
 
 cardinality 2048
   arm                            min    median       max   spread  vs first
-  A                          16.400   19.398   90.594   452.4%    1.000x
-  A'                         16.030   19.504  141.058   779.9%    0.977x
-  A/A delta on min: 2.31%
+  A                          15.226   16.006   22.160    45.5%    1.000x
+  A'                         15.316   16.622   25.211    64.6%    1.006x
+  A/A delta on min: 0.58%
 
 cardinality 250000
   arm                            min    median       max   spread  vs first
-  A                         137.388  167.797  488.071   255.2%    1.000x
-  A'                        129.999  163.367  391.325   201.0%    0.946x
-  A/A delta on min: 5.68%
+  A                         100.617  113.305  137.877    37.0%    1.000x
+  A'                         95.113  113.595  154.974    62.9%    0.945x
+  A/A delta on min: 5.79%
 
 === selectivity sweep (cardinality 128) ===
 
 selectivity 1%
   arm                            min    median       max   spread  vs first
-  A                           4.106    5.829  141.106  3336.6%    1.000x
-  A'                          4.143    6.236  125.825  2937.0%    1.009x
-  A/A delta on min: 0.89%
+  A                           3.277    3.973    6.104    86.3%    1.000x
+  A'                          3.404    3.896    5.173    51.9%    1.039x
+  A/A delta on min: 3.75%
 
 selectivity 50%
   arm                            min    median       max   spread  vs first
-  A                          15.183   21.322   46.212   204.4%    1.000x
-  A'                         15.424   20.819   36.141   134.3%    1.016x
-  A/A delta on min: 1.56%
+  A                          14.129   14.809   16.595    17.5%    1.000x
+  A'                         14.190   14.780   20.197    42.3%    1.004x
+  A/A delta on min: 0.43%
 
 selectivity 100%
   arm                            min    median       max   spread  vs first
-  A                          19.526   22.366   33.179    69.9%    1.000x
-  A'                         19.311   23.244   51.178   165.0%    0.989x
-  A/A delta on min: 1.11%
+  A                          18.461   19.180   23.595    27.8%    1.000x
+  A'                         18.316   18.951   25.202    37.6%    0.992x
+  A/A delta on min: 0.79%
 
 === resolution ===
-A/A delta on min:  median 1.56%   worst 5.68%   (n=6)
+A/A delta on min:  median 2.25%   worst 5.79%   (n=6)
 
 Decision rule: the smallest effect to be claimed is the ~19% execution-model gap.
 A resolution well under that means the harness can support the claim; a resolution

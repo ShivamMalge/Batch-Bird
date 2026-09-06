@@ -1,0 +1,68 @@
+-- detected ------------------------------------------------
+         os:          windows / x86_64
+         cpu:         AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD
+         rustc:       rustc 1.94.0 (4a4ef493e 2026-03-02)
+         profile:     release, codegen-units=1, lto=thin, debug=true
+         simd:        on (std::simd kernels)
+         data seed:   0xba7cb12d
+         hasher seed: 0xba7cb18d00000001  (fixed; see crate::hash)
+         -- declared -----------------------------------------------
+         power: Balanced + PROCTHROTTLEMIN/MAX 99%; affinity: core 0; estimator: min-of-N; alternating in-process; bench-dispatch
+
+Amdahl check: 1000000 rows, 50% selectivity, 30 samples, min-of-N, arms
+alternated in-process. Kernel speedups quoted from Phase 5 at 16M rows.
+
+
+================ cardinality 128 ================
+
+  stage               min (ms)    share
+  query (hash)          10.087   100.0%
+    filter kernel        1.176    11.7%
+    scan (copy)          1.264    12.5%
+  (499456 of 1000000 rows survive the filter)
+
+  hash path, filter kernel:
+    share of query      p = 0.117
+    kernel speedup      s = 1.46x  (Phase 5, isolated)
+    Amdahl ceiling          1.038x
+    observed                1.039x
+    agreement               +0.1 percentage points
+
+  sort path, sum kernel:
+    sort query              21.893 ms
+    run reduction           0.575 ms
+    share of query      p = 0.026
+    kernel speedup      s = 1.07x  (Phase 5, isolated)
+    Amdahl ceiling          1.002x
+
+  copy-on-scan:
+    Scan is 12.5% of the query. A borrowing Scan removes the write half of that
+    copy, so the ceiling on removing it entirely is 1.067x — and less in practice,
+    since the read is compulsory either way.
+
+================ cardinality 250000 ================
+
+  stage               min (ms)    share
+  query (hash)          80.950   100.0%
+    filter kernel        1.266     1.6%
+    scan (copy)          1.344     1.7%
+  (499456 of 1000000 rows survive the filter)
+
+  hash path, filter kernel:
+    share of query      p = 0.016
+    kernel speedup      s = 1.46x  (Phase 5, isolated)
+    Amdahl ceiling          1.005x
+    observed                0.982x
+    agreement               -2.3 percentage points
+
+  sort path, sum kernel:
+    sort query              58.260 ms
+    run reduction           6.233 ms
+    share of query      p = 0.107
+    kernel speedup      s = 1.07x  (Phase 5, isolated)
+    Amdahl ceiling          1.007x
+
+  copy-on-scan:
+    Scan is 1.7% of the query. A borrowing Scan removes the write half of that
+    copy, so the ceiling on removing it entirely is 1.008x — and less in practice,
+    since the read is compulsory either way.

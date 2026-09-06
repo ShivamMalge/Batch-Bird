@@ -8,6 +8,7 @@ one core, boost disabled, minimum-of-N, arms alternated inside a single process.
 | `scalar-arms.txt` | The measurement. Three scalar arms alternated ABC per sample across row count, selectivity, cardinality, plus hash vs sort. | **Primary.** Claims rest on this. |
 | `aa-null.txt` | A/A null: the same arm registered twice. Establishes the harness's resolution at median 1.57%, worst 5.45%. | **Primary.** Read this before any number in `scalar-arms.txt`. |
 | `layout-probe.txt` | Row width swept 24-144 B at fixed field count. Shows the row-vs-columnar gap is *not* mostly cache-line utilization. | **Primary.** |
+| `amdahl.txt` | Kernel share of query time, Amdahl ceiling, and observed speedup side by side. Closes the headline argument quantitatively. | **Primary.** |
 | `seed-sweep.txt` | Five fixed hasher seeds at 250k cardinality. 10.7% spread; our seed sits +0.1% off the mean. | **Primary.** The band on every hash group-by figure. |
 | `criterion-indicative.csv` | Criterion point estimates, exported by `scripts/summarize_bench.py`. | **Indicative only.** See below. |
 
