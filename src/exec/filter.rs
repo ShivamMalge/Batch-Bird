@@ -11,17 +11,19 @@
 //! always-filtered execution. DuckDB takes the other road; that trade is the documented
 //! road not taken.
 //!
-//! # Why the mask is built a word at a time
-//! [`mask_from`] evaluates 64 rows, packs them into one `u64`, and stores it once. That is the
-//! exact shape a SIMD comparison produces -- a lane mask becomes bits -- so Phase 5 replaces
-//! the inner loop and leaves everything around it untouched. The scalar version is not a
-//! placeholder; per `agents.md` it stays as the always-tested implementation.
+//! # Where the mask comes from
+//! Numeric comparisons go through [`crate::exec::kernels`], which picks the scalar or SIMD
+//! implementation depending on the `simd` feature. This operator never learns which ran --
+//! that was the point of building the scalar mask a word at a time in Phase 4: a vector
+//! compare produces bits too, just eight at a time, so wiring SIMD in changed nothing here
+//! but two call sites. String comparisons stay scalar by guardrail (`agents.md`).
 
 use std::collections::HashMap;
 
 use crate::exec::Operator;
 use crate::exec::batch::RecordBatch;
 use crate::exec::bitset::Bitset;
+use crate::exec::kernels::{compare, mask_f64, mask_from, mask_i64};
 use crate::exec::materialize::gather_column;
 use crate::plan::CompareOp;
 use crate::storage::Column;
@@ -74,16 +76,22 @@ impl<I: Operator> Filter<I> {
             .expect("filter column is validated when the pipeline is built");
 
         match (&self.kind, column) {
+            // The two vectorizable comparisons (systemDesign.md "SIMD Scope"). The dispatcher
+            // picks scalar or SIMD; this operator does not know or care which.
             (FilterKind::IntVsInt(op, literal), Column::Int64(values)) => {
-                mask_from(values.len(), |row| compare(&values[row], literal, *op))
+                mask_i64(values, *op, *literal)
             }
+            (FilterKind::FloatVsFloat(op, literal), Column::Float64(values)) => {
+                mask_f64(values, *op, *literal)
+            }
+            // Stays scalar: widening each i64 to f64 makes this a mixed-type comparison
+            // rather than the dense same-type compare systemDesign.md scopes SIMD to. It is
+            // vectorizable in principle (a lane-wise int-to-float convert, then compare), but
+            // widening the SIMD surface past what the docs pin needs sign-off.
             (FilterKind::IntVsFloat(op, literal), Column::Int64(values)) => {
                 mask_from(values.len(), |row| {
                     compare(&(values[row] as f64), literal, *op)
                 })
-            }
-            (FilterKind::FloatVsFloat(op, literal), Column::Float64(values)) => {
-                mask_from(values.len(), |row| compare(&values[row], literal, *op))
             }
             (FilterKind::Utf8Eq(code), Column::Utf8Dict { codes, .. }) => match code {
                 Some(code) => mask_from(codes.len(), |row| codes[row] == *code),
@@ -98,35 +106,6 @@ impl<I: Operator> Filter<I> {
             }
             _ => unreachable!("filter kind and column type are matched when the pipeline is built"),
         }
-    }
-}
-
-/// Evaluate `predicate` for every row, packing 64 results into each word.
-#[inline]
-fn mask_from<F: FnMut(usize) -> bool>(len: usize, mut predicate: F) -> Bitset {
-    let mut mask = Bitset::new(len);
-
-    for (word_index, word) in mask.words_mut().iter_mut().enumerate() {
-        let start = word_index * 64;
-        let end = (start + 64).min(len);
-        let mut bits = 0u64;
-        for row in start..end {
-            // Branchless on the store side: the bool becomes a bit rather than a jump. This
-            // is the loop Phase 5 replaces with a vector compare plus a mask extract.
-            bits |= (predicate(row) as u64) << (row - start);
-        }
-        *word = bits;
-    }
-
-    mask
-}
-
-#[inline]
-fn compare<T: PartialOrd + ?Sized>(a: &T, b: &T, op: CompareOp) -> bool {
-    match op {
-        CompareOp::Eq => a == b,
-        CompareOp::Lt => a < b,
-        CompareOp::Gt => a > b,
     }
 }
 

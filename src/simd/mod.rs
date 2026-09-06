@@ -1,67 +1,207 @@
-//! SIMD kernels — feature-gated, nightly-only (`cargo +nightly ... --features simd`).
+//! SIMD kernels -- feature-gated, nightly-only (`cargo +nightly ... --features simd`).
 //!
-//! # Phase 0 scope
-//! This module currently holds **only a toolchain smoke test**. The real kernels — filter
-//! comparison and `SUM` reduction over `Int64`/`Float64` — are Phase 5 work (`phases.md`).
-//! The smoke test exists because "confirm the toolchain supports `std::simd`" was an open
-//! question in the design docs; failing that check now is far cheaper than failing it in
-//! Phase 5 with the whole engine already built on the assumption.
+//! Every function here is an optimization of a reference implementation in
+//! [`exec::kernels`](crate::exec::kernels), which stays compiled and tested on stable. The
+//! tests there run both and assert they agree, so nothing in this file can silently drift.
+//! Phase 0's toolchain smoke test lived here and has been replaced by these.
 //!
-//! # The invariant this module establishes
-//! Every SIMD kernel has a scalar twin that produces identical results and is covered by the
-//! same tests (`agents.md` "Testing Expectations"). SIMD is an optimization path, never the
-//! only implementation. From Phase 5 on, the scalar twins live ungated in `exec/` and only
-//! the vectorized variants are gated here; the smoke test keeps both side by side because
-//! there is no `exec/` yet.
+//! # Compare to bitmask
+//! A vector compare produces a *lane mask*, and `to_bitmask` turns that into bits directly --
+//! [`LANES`] rows per instruction, with no per-row branch. Those bits drop straight into the
+//! packed [`Bitset`] the scalar path already builds, which is why [`crate::exec::filter`]
+//! needed no restructuring to accept them.
+//!
+//! # Lane width
+//! [`LANES`] is 8, so an `i64` or `f64` vector is 512 bits wide -- wider than AVX2's 256-bit
+//! registers. That is deliberate and is the point of `portable_simd`: LLVM legalizes an
+//! over-wide vector into however many native registers the target actually has, and on a
+//! 256-bit machine the two halves are independent, which *helps* by giving the pipeline two
+//! chains to interleave. Eight lanes also packs cleanly into the 64-bit bitset words: eight
+//! vectors fill exactly one word, and a chunk's bits never straddle a word boundary.
+//!
+//! # Every kernel ends with a scalar tail
+//! Slices are not multiples of eight. Each kernel runs full vectors over
+//! `as_chunks::<LANES>()` and finishes the remainder scalar. The tail is where off-by-one
+//! bugs live, so the parity tests deliberately include lengths of 1, 7, 9, 15, 63, 65 and 127.
 
 use std::simd::Simd;
-use std::simd::num::SimdInt;
+use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
+use std::simd::num::{SimdFloat, SimdInt};
 
-/// Lane count for the smoke test. Phase 5 will pick lane widths per kernel and per element
-/// type; 8 is just a width every target we care about supports.
-const LANES: usize = 8;
+use crate::exec::bitset::Bitset;
+use crate::exec::kernels::compare;
+use crate::plan::CompareOp;
 
-/// Scalar reference sum. Deliberately the dumbest correct implementation.
-pub fn sum_i64_scalar(values: &[i64]) -> i64 {
-    values.iter().sum()
+/// Lanes per vector. See the module docs on why over-wide is fine.
+pub const LANES: usize = 8;
+
+/// Fold `LANES` bits produced by one vector compare into the mask at row offset `base`.
+///
+/// `base` is always a multiple of `LANES`, and `LANES` divides 64, so the bits for one chunk
+/// always land inside a single word -- no cross-word shifting to get wrong.
+#[inline]
+fn write_chunk_bits(mask: &mut Bitset, base: usize, bits: u64) {
+    if bits != 0 {
+        mask.words_mut()[base / 64] |= bits << (base % 64);
+    }
 }
 
-/// Vectorized sum — a *smoke test*, not the Phase 5 kernel.
+/// `Int64` column compared against a literal, straight to a bitmask.
+pub fn mask_i64_simd(values: &[i64], op: CompareOp, literal: i64) -> Bitset {
+    let mut mask = Bitset::new(values.len());
+    let splat = Simd::<i64, LANES>::splat(literal);
+    let (chunks, tail) = values.as_chunks::<LANES>();
+
+    for (index, chunk) in chunks.iter().enumerate() {
+        let vector = Simd::from_array(*chunk);
+        let lanes = match op {
+            CompareOp::Eq => vector.simd_eq(splat),
+            CompareOp::Lt => vector.simd_lt(splat),
+            CompareOp::Gt => vector.simd_gt(splat),
+        };
+        write_chunk_bits(&mut mask, index * LANES, lanes.to_bitmask());
+    }
+
+    let base = chunks.len() * LANES;
+    for (offset, value) in tail.iter().enumerate() {
+        if compare(value, &literal, op) {
+            mask.set(base + offset);
+        }
+    }
+
+    mask
+}
+
+/// `Float64` column compared against a literal.
 ///
-/// Proves three things compile and run correctly on this toolchain: `Simd` construction from
-/// a slice, lane-wise arithmetic, and a horizontal reduction. Uses `wrapping_add` because
-/// SIMD lane arithmetic wraps rather than panicking on overflow the way debug-mode scalar
-/// `+` does — keeping the two twins bit-identical on overflow is a real Phase 5 concern, and
-/// noting it here is cheaper than rediscovering it later.
+/// IEEE comparison semantics are preserved lane-wise, so a `NaN` would compare false against
+/// everything just as it does scalar-side. In practice none reaches here: the CSV loader and
+/// the parser both reject non-finite values at the boundary (Phase 1, Phase 2).
+pub fn mask_f64_simd(values: &[f64], op: CompareOp, literal: f64) -> Bitset {
+    let mut mask = Bitset::new(values.len());
+    let splat = Simd::<f64, LANES>::splat(literal);
+    let (chunks, tail) = values.as_chunks::<LANES>();
+
+    for (index, chunk) in chunks.iter().enumerate() {
+        let vector = Simd::from_array(*chunk);
+        let lanes = match op {
+            CompareOp::Eq => vector.simd_eq(splat),
+            CompareOp::Lt => vector.simd_lt(splat),
+            CompareOp::Gt => vector.simd_gt(splat),
+        };
+        write_chunk_bits(&mut mask, index * LANES, lanes.to_bitmask());
+    }
+
+    let base = chunks.len() * LANES;
+    for (offset, value) in tail.iter().enumerate() {
+        if compare(value, &literal, op) {
+            mask.set(base + offset);
+        }
+    }
+
+    mask
+}
+
+/// Sum a dense `Int64` slice.
+///
+/// Lane arithmetic wraps, matching `SumAccumulator<i64>` and the naive baseline. Integer
+/// addition stays associative under wrapping, so this is bit-identical to the scalar version
+/// on every input, overflow included.
 pub fn sum_i64_simd(values: &[i64]) -> i64 {
     let (chunks, tail) = values.as_chunks::<LANES>();
 
+    // One accumulator, deliberately. Unrolling into two or four would break the loop-carried
+    // dependency chain and is the standard next optimization -- Phase 6 can measure whether
+    // this reduction is latency-bound before adding that complexity.
     let mut acc = Simd::<i64, LANES>::splat(0);
     for chunk in chunks {
         acc += Simd::from_array(*chunk);
     }
 
-    // Horizontal reduce, then fold in the remainder the scalar way. Every real kernel has
-    // this same shape: a vectorized body plus a scalar tail for the ragged end.
-    acc.reduce_sum()
-        .wrapping_add(tail.iter().fold(0i64, |a, b| a.wrapping_add(*b)))
+    let vector_total = acc.reduce_sum();
+    tail.iter()
+        .fold(vector_total, |total, v| total.wrapping_add(*v))
+}
+
+/// Sum a dense `Float64` slice.
+///
+/// **Not bit-identical to the scalar version.** This accumulates eight partial sums and
+/// combines them at the end, which is a different order, and floating-point addition is not
+/// associative. Often *more* accurate than the serial version, since eight shorter chains
+/// accumulate less rounding error than one long one -- but different, and callers comparing
+/// against the scalar reference must use a tolerance.
+pub fn sum_f64_simd(values: &[f64]) -> f64 {
+    let (chunks, tail) = values.as_chunks::<LANES>();
+
+    let mut acc = Simd::<f64, LANES>::splat(0.0);
+    for chunk in chunks {
+        acc += Simd::from_array(*chunk);
+    }
+
+    let vector_total = acc.reduce_sum();
+    tail.iter().fold(vector_total, |total, v| total + *v)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The twins must agree — including on inputs shorter than one vector, and on inputs
-    /// whose length is not a multiple of `LANES` (exercising the scalar tail).
+    /// Agreement with the scalar reference is asserted in `exec::kernels`, where both are in
+    /// scope. These cover the vector-specific mechanics instead.
     #[test]
-    fn simd_sum_matches_scalar() {
-        for len in [0, 1, 7, 8, 9, 63, 64, 1000] {
-            let values: Vec<i64> = (0..len as i64).map(|i| i * 3 - 7).collect();
-            assert_eq!(
-                sum_i64_simd(&values),
-                sum_i64_scalar(&values),
-                "twins disagreed at len {len}"
-            );
+    fn bits_land_at_the_right_offsets_across_a_word() {
+        // 64 values, one per lane position: only every third row passes, which puts set bits
+        // at varied positions inside each 8-lane chunk and across all eight chunks of a word.
+        let values: Vec<i64> = (0..64).collect();
+        let mask = mask_i64_simd(&values, CompareOp::Lt, 20);
+
+        assert_eq!(mask.count_ones(), 20);
+        assert_eq!(
+            mask.iter_ones().collect::<Vec<_>>(),
+            (0..20).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn handles_a_ragged_tail() {
+        // 13 = one full vector plus a five-row tail.
+        let values: Vec<i64> = (0..13).collect();
+        let mask = mask_i64_simd(&values, CompareOp::Gt, 7);
+        assert_eq!(mask.len(), 13);
+        assert_eq!(mask.iter_ones().collect::<Vec<_>>(), vec![8, 9, 10, 11, 12]);
+    }
+
+    #[test]
+    fn handles_inputs_shorter_than_one_vector() {
+        let values = [5i64, 1, 9];
+        let mask = mask_i64_simd(&values, CompareOp::Gt, 4);
+        assert_eq!(mask.iter_ones().collect::<Vec<_>>(), vec![0, 2]);
+    }
+
+    #[test]
+    fn handles_empty_input() {
+        assert_eq!(mask_i64_simd(&[], CompareOp::Gt, 0).count_ones(), 0);
+        assert_eq!(sum_i64_simd(&[]), 0);
+        assert_eq!(sum_f64_simd(&[]), 0.0);
+    }
+
+    #[test]
+    fn float_compare_selects_the_right_lanes() {
+        let values: Vec<f64> = (0..20).map(|i| i as f64 * 0.5).collect();
+        let mask = mask_f64_simd(&values, CompareOp::Gt, 4.0);
+        // 0.0, 0.5, .. 9.5 -- values above 4.0 start at index 9.
+        assert_eq!(
+            mask.iter_ones().collect::<Vec<_>>(),
+            (9..20).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn sums_span_the_vector_tail_boundary() {
+        for len in [0usize, 1, 7, 8, 9, 100] {
+            let values: Vec<i64> = (1..=len as i64).collect();
+            let expected = (len as i64 * (len as i64 + 1)) / 2;
+            assert_eq!(sum_i64_simd(&values), expected, "len {len}");
         }
     }
 }

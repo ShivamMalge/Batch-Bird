@@ -24,6 +24,7 @@ pub mod aggregate;
 pub mod batch;
 pub mod bitset;
 pub mod filter;
+pub mod kernels;
 pub mod materialize;
 pub mod project;
 pub mod scan;

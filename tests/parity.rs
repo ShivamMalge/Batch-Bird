@@ -11,9 +11,16 @@
 //! the same sequence, and `f64` sums come out bit-identical despite floating-point addition
 //! being non-associative.
 //!
-//! **This changes in Phase 5.** A SIMD reduction accumulates across lanes, which is a
-//! different order, so float sums may then differ in the last ULP and these assertions will
-//! need a tolerance. Integer sums stay exact regardless, because both engines wrap.
+//! Phase 5 did **not** change this, contrary to what the phase notes predicted. The SIMD
+//! filter is exact (a comparison has no rounding), and the SIMD sum reduction is not on this
+//! path at all — the hash group-by scatters into per-group accumulators rather than reducing
+//! a dense slice. These assertions therefore still hold bit-for-bit under
+//! `cargo +nightly test --features simd`, which is a stronger check than a tolerance would be.
+//!
+//! **Phase 6 is where it changes.** Sort-based grouping makes each group contiguous, so its
+//! aggregation *is* a dense reduction and will use the lane-wise sum. Float comparisons
+//! against this engine will need a tolerance then; integer sums stay exact regardless,
+//! because every path wraps.
 
 use batchbird::bench::naive_query;
 use batchbird::parser::parse;
