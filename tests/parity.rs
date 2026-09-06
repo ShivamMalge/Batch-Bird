@@ -1,8 +1,13 @@
-//! Phase 4's acceptance criterion: the batch pipeline must agree with the naive baseline.
+//! Every execution arm must produce the same answer.
 //!
-//! The baseline is the oracle (`agents.md` Testing Expectations). These are integration tests
-//! rather than unit tests because the point is precisely that two *whole engines* agree —
-//! anything reaching inside either one would be testing something narrower.
+//! The columnar naive baseline is the oracle (`agents.md` Testing Expectations). These are
+//! integration tests rather than unit tests because the point is precisely that *whole
+//! engines* agree — anything reaching inside one would be testing something narrower.
+//!
+//! Three arms are compared here: row-oriented storage, columnar row-at-a-time, and the
+//! columnar batch pipeline (which the `simd` feature turns into the fourth arm without
+//! changing its results). A benchmark that compares arms producing different answers is
+//! measuring nothing, so this suite is what makes the numbers in `phases.md` mean anything.
 //!
 //! # Why equality can be exact, even for floats
 //! Both engines visit surviving rows in the same global order: the baseline sweeps rows
@@ -22,7 +27,7 @@
 //! against this engine will need a tolerance then; integer sums stay exact regardless,
 //! because every path wraps.
 
-use batchbird::bench::naive_query;
+use batchbird::bench::{naive_query, row_query};
 use batchbird::parser::parse;
 use batchbird::plan::batch_query;
 use batchbird::storage::{Column, DataType, Field, Schema, Table, infer_schema, read_csv};
@@ -121,35 +126,44 @@ fn rows_of(result: &Table, group: &str, agg: &str) -> Vec<(String, u64)> {
     rows
 }
 
-/// Run both engines and assert they agree exactly.
+/// Run every arm and assert they agree exactly with the oracle.
 fn assert_parity(table: &Table, sql: &str) -> usize {
     let plan = parse(sql).unwrap_or_else(|e| panic!("{sql:?} did not parse: {e}"));
 
     let naive = naive_query(table, &plan).unwrap_or_else(|e| panic!("naive failed: {e}"));
-    let batched = batch_query(table, &plan).unwrap_or_else(|e| panic!("batched failed: {e}"));
-
-    assert_eq!(
-        naive.nrows(),
-        batched.nrows(),
-        "group count differs for {sql:?}"
-    );
-
-    let mut naive_names: Vec<&str> = naive.column_names().collect();
-    let mut batched_names: Vec<&str> = batched.column_names().collect();
-    naive_names.sort();
-    batched_names.sort();
-    assert_eq!(
-        naive_names, batched_names,
-        "result schema differs for {sql:?}"
-    );
-
     let group = &plan.group_by;
     let agg = plan.aggregation.output_name();
-    assert_eq!(
-        rows_of(&naive, group, &agg),
-        rows_of(&batched, group, &agg),
-        "results differ for {sql:?}"
-    );
+    let expected = rows_of(&naive, group, &agg);
+
+    let arms = [
+        ("batched", batch_query(table, &plan)),
+        ("row-oriented", row_query(table, &plan)),
+    ];
+
+    for (name, result) in arms {
+        let result = result.unwrap_or_else(|e| panic!("{name} failed on {sql:?}: {e}"));
+
+        assert_eq!(
+            naive.nrows(),
+            result.nrows(),
+            "{name}: group count differs for {sql:?}"
+        );
+
+        let mut expected_names: Vec<&str> = naive.column_names().collect();
+        let mut actual_names: Vec<&str> = result.column_names().collect();
+        expected_names.sort();
+        actual_names.sort();
+        assert_eq!(
+            expected_names, actual_names,
+            "{name}: result schema differs for {sql:?}"
+        );
+
+        assert_eq!(
+            expected,
+            rows_of(&result, group, &agg),
+            "{name}: results differ for {sql:?}"
+        );
+    }
 
     naive.nrows()
 }
@@ -283,6 +297,20 @@ fn engines_agree_when_all_rows_share_one_group() {
 }
 
 #[test]
+fn the_row_oriented_arm_holds_an_independent_copy_of_the_data() {
+    // Not a correctness property but a fairness one: if the row store were somehow sharing
+    // the dictionary, it would not be measuring row-oriented layout at all. Every row owns
+    // its own text, which is exactly the memory cost the comparison is meant to expose.
+    use batchbird::bench::build_row_store;
+
+    let table = synthetic_table(5_000, 6, 0x0BEEF);
+    let plan = parse("SELECT region, SUM(amount) FROM t WHERE amount > 0 GROUP BY region").unwrap();
+
+    let store = build_row_store(&table, &plan).unwrap();
+    assert_eq!(store.rows(), 5_000, "one struct per source row");
+}
+
+#[test]
 fn engines_agree_on_float_sums_bit_for_bit() {
     // Documented above: identical accumulation order means identical bits, today. When Phase 5
     // reduces across SIMD lanes this is the assertion that will start failing, and that
@@ -325,13 +353,25 @@ fn both_engines_reject_the_same_invalid_plans() {
         let plan = parse(sql).unwrap();
         let naive = naive_query(&table, &plan);
         let batched = batch_query(&table, &plan);
+        let rows = row_query(&table, &plan);
 
         assert!(naive.is_err(), "naive accepted {sql:?}");
         assert!(batched.is_err(), "batched accepted {sql:?}");
+        assert!(rows.is_err(), "row-oriented accepted {sql:?}");
+
+        // Identical messages, not merely identical failure: the three arms validate
+        // independently (agents.md forbids the baselines sharing code with the batch engine),
+        // so matching text is what proves the duplication has not drifted.
+        let reason = naive.unwrap_err().to_string();
         assert_eq!(
-            naive.unwrap_err().to_string(),
+            reason,
             batched.unwrap_err().to_string(),
-            "engines disagree on why {sql:?} is invalid"
+            "batched disagrees on why {sql:?} is invalid"
+        );
+        assert_eq!(
+            reason,
+            rows.unwrap_err().to_string(),
+            "row-oriented disagrees on why {sql:?} is invalid"
         );
     }
 }
