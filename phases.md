@@ -277,17 +277,178 @@ Decisions made here that the design docs did not cover:
   than it appears to. Worth a line in the Phase 7 write-up.
 
 ## Phase 6 — Sort-Based Grouping + Full Benchmark Suite
-**Status:** not started
-- Implement sort-then-run-length-aggregate as a secondary group-by strategy.
-- `criterion` benchmarks: naive vs. batched vs. SIMD; hash-group vs. sort-group, phases
-  profiled separately (build-index vs. scatter-accumulate).
+**Status:** 🟡 in progress — scalar arms measured and recorded; SIMD dispatch restructure
+outstanding. 147 tests on stable, 158 on nightly + `--features simd`, 12 parity, clippy and
+rustfmt clean, CI green.
 
-> **⚠️ Do not unify the naive baseline with the batch engine here.** This is exactly the
-> phase where the temptation shows up — you'll be staring at both implementations side by
-> side while writing benchmarks and it'll look like they share filter logic worth extracting.
-> Resist it. The naive baseline exists specifically to isolate "row-at-a-time" as a variable;
-> sharing code with the batch engine defeats that isolation. See `agents.md` Benchmarking
-> Expectations for the same rule.
+### What landed
+- **Row-oriented arm** (`src/bench/row_store.rs`): array-of-structs storage, generic over the
+  three field types so a row is packed with no per-field tags. Supplies the *layout* half of
+  the thesis, which the existing arms could not: they all read the same columnar `Table`.
+- **Sort-based grouping** (`src/exec/sort_aggregate.rs`), selectable via `GroupStrategy`
+  alongside — never replacing — the hash path.
+- **Criterion suite** (`benches/arms.rs`, `benches/group_by.rs`) + deterministic data
+  generation (`src/bench/data.rs`) + `scripts/summarize_bench.py` for CSV export.
+- **In-process alternating harness** (`src/bench/harness.rs`) and the examples that drive it.
+
+### ⚠️ The measurement had to be rebuilt before any number could be trusted
+
+This phase produced a large body of numbers that had to be **thrown away**. Recorded because
+the failure is more instructive than the result would have been.
+
+**What went wrong, in order:**
+1. A scalar-vs-SIMD comparison silently also changed compiler (stable 1.94 vs nightly 1.96).
+   Caught by the `rustc` line in `environment()`.
+2. The control-validation gate then failed outright: benchmarks containing **no vector code**
+   (`sort/sort-pairs`, `hash/build-index`) moved 5–12% with p ≤ 0.01 when the SIMD feature was
+   toggled. A comparison sort cannot get 12% faster from a SIMD feature it never calls.
+3. The decisive test: two runs of the **same binary on the same data** differed by a median of
+   **7.5%** and a maximum of **66.8%**. Every effect under study was below that floor.
+
+**Three independent causes, separated by experiment:**
+
+| cause | evidence | fix |
+|---|---|---|
+| One-sided interference | `sort-pairs/8` moved 19.7% on *provably identical work*; the minimum of the same samples moved 0.3% | minimum-of-N, not mean |
+| Per-process hasher seeding | `std` and `hashbrown` both seed randomly; three runs gave three iteration orders | fixed-seed FxHash as the default (`src/hash.rs`) |
+| Between-process drift | levels shift ~8% run to run regardless of pinning | alternate arms ABAB **inside one process** |
+
+The dataset was cleared as a cause first: byte-identical across three processes
+(`examples/determinism.rs`).
+
+**Machine, and a hypothesis ruled out.** AMD Ryzen 7 5800HS — 8 homogeneous Zen 3 cores, **no
+P/E hybrid**, so core heterogeneity was not the explanation. L3 is **16 MB** and L2 512 KB per
+core, which corrects an earlier assumption of 32 MB. Runs are pinned to one core with the
+processor state capped at 99% to disable boost; conditions are declared through
+`BATCHBIRD_RUN_CONFIG` and recorded by `environment()` as declarations rather than as facts the
+program verified.
+
+**Deliberate deviation from phases.md, with reasoning.** phases.md specified criterion for the
+comparisons. Criterion is kept for the reproducible artifact and CSV export, but **its
+cross-benchmark deltas are indicative only** and no claim rests on them. It runs A to
+completion then B, so drift attaches to one arm; and its estimator assumes symmetric noise when
+interference is strictly one-sided. What survived every check in Phases 5 and 6 was the
+alternate-in-process, best-of-N pattern from `examples/kernels.rs`, so that is what the
+comparisons are read from.
+
+### Harness resolution — measured, not assumed
+
+`examples/aa_null.rs` registers **the same arm twice** and alternates them. True difference is
+zero, so the spread is the harness's resolution. Six axis points:
+
+**median 1.57%, worst 5.45%** — against a smallest claimed effect of ~40%, that is 25× headroom.
+
+The distribution shape is the finding: per-sample spread runs 24–160%, while the *minimum*
+reproduces to 0.27–5.45%. The tail is entirely one-sided, exactly as the estimator choice
+predicted.
+
+### Results — three scalar arms, 1M rows unless stated
+
+**Row count. There is no knee, and both cache hypotheses are refuted.**
+
+| rows | working set | row-oriented | naive | batched | layout | execution |
+|---|---|---|---|---|---|---|
+| 250k | 3 MB | 22.19 ns/row | 12.89 | 9.22 | 1.72x | 1.40x |
+| 1M | 12 MB | 22.27 | 12.99 | 9.30 | 1.71x | 1.40x |
+| 2M | 24 MB | 22.92 | 13.41 | 9.44 | 1.71x | 1.42x |
+| 4M | 48 MB | 23.44 | 13.51 | 9.68 | 1.74x | 1.40x |
+| 8M | 96 MB | 23.60 | 13.34 | 9.74 | 1.77x | 1.37x |
+
+Per-row cost rises 3.5% (naive) and 5.6% (batched) across a **32x range** of rows and working
+set — at or barely above resolution. The set crosses the 16 MB L3 between 1M and 2M and the L2
+TLB's ~8 MB of 4K coverage between 250k and 1M, and **nothing happens at either point**. The
+L3 and TLB hypotheses are both dead, and the THP discriminator run is no longer needed because
+there is nothing to discriminate.
+
+This corroborates the bandwidth arithmetic independently: the pipeline moves 12 B/row and runs
+at **0.75–1.4 GB/s against a ~20 GB/s ceiling** demonstrated by the Phase 5 sum kernels. At 4–9%
+of achievable bandwidth, working-set size simply is not a variable. An earlier note calling
+this "bandwidth-bound" was wrong by an order of magnitude and is struck.
+
+**The gaps, stable across 32x scale:** layout **~1.7x**, execution model **~1.4x**. Both far
+above resolution, and both *higher and tighter* than the retracted cross-run numbers (1.21–1.44x
+and 1.19–1.52x), which understated the layout effect and scattered the execution effect.
+
+**Selectivity (1M rows, cardinality 128).**
+
+| selectivity | layout | execution |
+|---|---|---|
+| 1% | 0.96x | **0.91x** |
+| 10% | 2.44x | **0.87x** |
+| 50% | 1.75x | 1.40x |
+| 90% | 2.21x | 1.22x |
+| 100% | 2.38x | 1.21x |
+
+Batched is genuinely **slower** than the naive row loop below ~10% selectivity, well outside
+resolution. The mechanism is confirmed in code, not inferred: `slice_column` is an
+unconditional `.to_vec()`, and `Scan` calls it for every column of every batch *before* the
+filter runs. At 1% the pipeline pays a full copy to keep one row in a hundred; at 90–100% it
+pays that copy plus compaction's second one.
+
+Stated precisely: this is not "batched execution loses at extreme selectivity" but **"this
+pipeline's copy-on-scan design loses at extreme selectivity."** `Scan` holds `&'a Table`, which
+outlives the query, so a borrowing `RecordBatch` would delete the first copy outright. Named,
+measured, and deliberately not implemented — it needs a pinned-type change.
+
+**Cardinality (1M rows, 50% selectivity).**
+
+| cardinality | layout | execution |
+|---|---|---|
+| 8 | 1.61x | 1.44x |
+| 128 | 1.74x | 1.44x |
+| 2,048 | 3.17x | 1.40x |
+| 32,768 | 4.35x | 1.58x |
+| 250,000 | **8.97x** | 1.19x |
+
+The layout gap grows 5.6x across the sweep while the execution gap stays flat. That is
+dictionary encoding measured directly: only the row store hashes and compares actual strings,
+and at 250k distinct values it costs 846 ns/row against columnar's 94.
+
+**Hash vs sort group-by (1M rows, 50% selectivity).**
+
+| cardinality | hash | sort | sort/hash | verdict |
+|---|---|---|---|---|
+| 8 | 9.463 ms | 19.266 | 2.04x | hash wins |
+| 2,048 | 10.306 | 25.209 | 2.45x | hash wins |
+| 32,768 | 22.189 | 37.354 | 1.68x | hash wins |
+| 250,000 | 75.203 | 67.726 | 0.90x | **not separable** |
+
+`systemDesign.md` predicted sort-group loses at this scale. It does, at every cardinality where
+the comparison can be made. An earlier reading that sort *won* at 250k (0.81x, from the invalid
+cross-run data) **does not survive**: the clean measurement gives 0.90x, which falls inside
+hash group-by's own ±10.7% seed-dependent variance.
+
+That band is a finding in its own right, promoted out of methodology. `examples/seed_sweep.rs`
+measured a **10.7% spread** across five fixed hasher seeds at 250k cardinality — the same order
+as the effects under study — with our chosen seed landing **+0.1% off the mean**, so fixing it
+cost essentially no bias. **Hash group-by carries a variance component from collision pattern
+that is independent of execution model and data; sort-based grouping has none, because a sort
+has no collision pattern.** It shows up within a single run too: at 250k, hash's per-sample
+spread is 18.4% against sort's 4.3%. The comparison reports the band and refuses to call a
+winner inside it.
+
+**Method validation.** Between two full runs the absolute level drifted ~8% (naive 12.99 →
+14.08 ns/row) while the ratios moved 2–3% (layout 1.71 → 1.67x, execution 1.40 → 1.44x). Drift
+lands on both arms and cancels in the ratio, which is the whole reason for alternating.
+
+### Caveats the write-up must carry
+- **Both gaps are lower bounds.** The two row loops share a per-row enum-dispatch floor of
+  ~5 ns/row that is layout-independent, so it inflates numerator and denominator alike and
+  pulls every ratio toward 1.0. Measured at 1% selectivity, where the row store moves 4x the
+  bytes (32 MB vs 8 MB) in the same wall time — neither arm is memory-bound there. The naive
+  baseline is **not** optimized to fix this: it is the control (`agents.md`).
+- **The row struct is 32 B** and stores `amount` twice, since this query filters and sums the
+  same column. A realistic row store would carry all four columns inline at 40 B, so the arm
+  understates rather than inflates the row-oriented penalty.
+- **Permanent canaries.** The control gate and `examples/determinism.rs` run on every
+  measurement. If either moves, the run is void.
+
+### Outstanding
+- SIMD dispatch restructure: runtime selection behind a bench-only feature, resolved **per
+  kernel call, never per row**; default build keeps `cfg` dispatch and zero runtime branch.
+- Re-measure the SIMD arm through the alternating harness once that lands.
+- Restore the power scheme (Balanced, `381b4222-f694-41f0-9685-ff5bb260df2e`, unrestricted
+  processor state) when Phase 6 measurement is finished.
 
 ## Phase 7 — Write-Up
 **Status:** not started

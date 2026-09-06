@@ -1,7 +1,5 @@
 //! `Scan` -- the leaf: cuts a [`Table`] into fixed-size batches.
 
-use std::collections::HashMap;
-
 use crate::exec::batch::RecordBatch;
 use crate::exec::materialize::slice_column;
 use crate::exec::{BATCH_SIZE, Operator};
@@ -53,7 +51,7 @@ impl Operator for Scan<'_> {
         let end = (start + self.batch_size).min(self.table.nrows());
         self.next_row = end;
 
-        let mut columns = HashMap::with_capacity(self.columns.len());
+        let mut columns = crate::hash::map_with_capacity(self.columns.len());
         for name in &self.columns {
             let column = self
                 .table

@@ -33,8 +33,6 @@
 //! artificially slow would be adjusting the benchmark to force a cleaner story, which
 //! `agents.md` explicitly forbids.
 
-use std::collections::HashMap;
-
 use crate::error::{Error, Result};
 use crate::plan::{AggFunc, CompareOp, Literal, LogicalPlan, Predicate};
 use crate::storage::{Column, Table};
@@ -54,10 +52,9 @@ pub fn naive_query(table: &Table, plan: &LogicalPlan) -> Result<Table> {
     let mut summer = Summer::new(table, &plan.aggregation.input)?;
     let filter = RowFilter::new(table, &plan.filter)?;
 
-    // Group key -> slot. `hashbrown` rather than std for the same reason the batch engine
-    // uses it (`techstack.md`): std's SipHash on small integer keys would dominate both
-    // sides and blur the difference the benchmark is trying to show.
-    let mut slots: hashbrown::HashMap<u64, usize> = hashbrown::HashMap::new();
+    // Same map and the same fixed seed as the batch engine (`techstack.md`, `crate::hash`),
+    // so neither the hasher nor its seed is a variable between the arms.
+    let mut slots: crate::hash::Map<u64, usize> = crate::hash::map();
     let mut keys: Vec<u64> = Vec::new();
 
     for row in 0..table.nrows() {
@@ -302,7 +299,7 @@ fn build_result(
         Summer::Float64 { totals, .. } => Column::Float64(totals),
     };
 
-    let mut columns = HashMap::new();
+    let mut columns = crate::hash::map_with_capacity(2);
     columns.insert(plan.group_by.clone(), group_column);
     // The output schema is a property of the query, not of the engine running it, so both
     // implementations label the result through the same definition. It is what lets the

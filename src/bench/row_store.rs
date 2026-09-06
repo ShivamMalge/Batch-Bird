@@ -298,7 +298,7 @@ impl<G: GroupField, F: FilterField, V: ValueField> RowEngine for RowStore<G, F, 
 
         // Same map and the same first-seen slot assignment as the other arms, so group-by
         // structure is not a variable. The keys differ, which is the point.
-        let mut slots: hashbrown::HashMap<G, usize> = hashbrown::HashMap::new();
+        let mut slots: crate::hash::Map<G, usize> = crate::hash::map();
         let mut keys: Vec<G> = Vec::new();
         let mut totals: Vec<V> = Vec::new();
 
@@ -322,7 +322,7 @@ impl<G: GroupField, F: FilterField, V: ValueField> RowEngine for RowStore<G, F, 
         }
 
         let nrows = keys.len();
-        let mut columns = std::collections::HashMap::with_capacity(2);
+        let mut columns = crate::hash::map_with_capacity(2);
         columns.insert(plan.group_by.clone(), G::into_column(keys));
         columns.insert(plan.aggregation.output_name(), V::into_column(totals));
 

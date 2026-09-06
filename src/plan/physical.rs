@@ -97,8 +97,10 @@ pub fn build_with<'a>(
         vec![plan.group_by.clone(), plan.aggregation.input.clone()]
     };
 
-    let scan = Scan::new(table, scan_columns);
-    let filter = Filter::new(scan, plan.filter.column.clone(), filter_kind);
+    let scan = Scan::new(table, scan_columns.clone());
+    // Compaction visits columns in this order rather than the map's, so heap layout does not
+    // depend on a hashbrown implementation detail (`Filter::column_order`).
+    let filter = Filter::new(scan, plan.filter.column.clone(), filter_kind, scan_columns);
     let source = Project::new(filter, project_columns);
 
     let group_columns = vec![plan.group_by.clone()];

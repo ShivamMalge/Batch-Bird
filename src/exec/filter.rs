@@ -18,8 +18,6 @@
 //! compare produces bits too, just eight at a time, so wiring SIMD in changed nothing here
 //! but two call sites. String comparisons stay scalar by guardrail (`agents.md`).
 
-use std::collections::HashMap;
-
 use crate::exec::Operator;
 use crate::exec::batch::RecordBatch;
 use crate::exec::bitset::Bitset;
@@ -54,14 +52,27 @@ pub struct Filter<I> {
     input: I,
     column: String,
     kind: FilterKind,
+    /// The batch's columns in **schema order**, not map order.
+    ///
+    /// Compaction allocates a fresh buffer per column, so the order they are visited fixes the
+    /// order those allocations happen and therefore the heap layout the next operator reads.
+    /// Iterating the map would make that order depend on the hasher's internal bucket layout:
+    /// stable once the seed is fixed, but arbitrary, and silently coupled to a `hashbrown`
+    /// implementation detail. Carrying the order explicitly makes it a property of the plan.
+    column_order: Vec<String>,
 }
 
 impl<I: Operator> Filter<I> {
-    pub fn new(input: I, column: String, kind: FilterKind) -> Self {
+    pub fn new(input: I, column: String, kind: FilterKind, column_order: Vec<String>) -> Self {
+        debug_assert!(
+            column_order.contains(&column),
+            "the filter column must be among the columns being scanned"
+        );
         Filter {
             input,
             column,
             kind,
+            column_order,
         }
     }
 
@@ -124,11 +135,11 @@ impl<I: Operator> Operator for Filter<I> {
             }
 
             // Compaction: every column, not just the filtered one, so downstream sees a plain
-            // batch with no idea a filter ran.
-            let mut columns = HashMap::with_capacity(batch.ncols());
-            for name in batch.column_names() {
-                let column = batch.column(name).expect("name came from this batch");
-                columns.insert(name.to_string(), gather_column(column, &mask, selected));
+            // batch with no idea a filter ran. Visited in schema order -- see `column_order`.
+            let mut columns = crate::hash::map_with_capacity(batch.ncols());
+            for name in &self.column_order {
+                let column = batch.column(name).expect("scan produced this column");
+                columns.insert(name.clone(), gather_column(column, &mask, selected));
             }
 
             return Some(RecordBatch::new(columns, selected));
@@ -164,8 +175,9 @@ mod tests {
 
     /// Run a filter over the whole table and return the surviving `n` values in order.
     fn survivors(table: &Table, column: &str, kind: FilterKind, batch_size: usize) -> Vec<i64> {
-        let scan = Scan::with_batch_size(table, all_columns(table), batch_size);
-        let mut filter = Filter::new(scan, column.to_string(), kind);
+        let columns = all_columns(table);
+        let scan = Scan::with_batch_size(table, columns.clone(), batch_size);
+        let mut filter = Filter::new(scan, column.to_string(), kind, columns);
 
         let mut out = Vec::new();
         while let Some(batch) = filter.next_batch() {
@@ -203,6 +215,7 @@ mod tests {
             scan,
             "n".to_string(),
             FilterKind::IntVsInt(CompareOp::Gt, 3),
+            all_columns(&table),
         );
 
         let batch = filter.next_batch().expect("a batch survives");
@@ -275,6 +288,7 @@ mod tests {
             scan,
             "n".to_string(),
             FilterKind::IntVsInt(CompareOp::Gt, 100),
+            all_columns(&table),
         );
 
         assert!(
@@ -291,6 +305,7 @@ mod tests {
             Scan::with_batch_size(&table, all_columns(&table), 1024),
             "n".to_string(),
             FilterKind::IntVsInt(CompareOp::Gt, 3),
+            all_columns(&table),
         );
 
         let batch = scan.next_batch().unwrap();
@@ -314,6 +329,7 @@ mod tests {
             Scan::with_batch_size(&table, vec!["n".to_string()], 1024),
             "n".to_string(),
             FilterKind::IntVsInt(CompareOp::Lt, 70),
+            vec!["n".to_string()],
         );
 
         let batch = scan.next_batch().unwrap();

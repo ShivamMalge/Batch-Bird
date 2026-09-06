@@ -1,0 +1,60 @@
+-- detected ------------------------------------------------
+         os:          windows / x86_64
+         cpu:         AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD
+         rustc:       rustc 1.94.0 (4a4ef493e 2026-03-02)
+         profile:     release, codegen-units=1, lto=thin, debug=true
+         simd:        off (scalar kernels)
+         data seed:   0xba7cb12d
+         hasher seed: 0xba7cb18d00000001  (fixed; see crate::hash)
+         -- declared -----------------------------------------------
+         power: Balanced + PROCTHROTTLEMIN/MAX 99%; affinity: core 0; estimator: min-of-N; alternating ABAB in-process
+
+A/A null: the same arm registered twice, alternated ABAB, 40 samples after 3 warmup rounds.
+True difference is zero; whatever appears is resolution.
+
+=== cardinality sweep (selectivity 50%) ===
+
+cardinality 8
+  arm                            min    median       max   spread  vs first
+  A                          13.414   14.334   20.810    55.1%    1.000x
+  A'                         13.629   14.332   17.976    31.9%    1.016x
+  A/A delta on min: 1.57%
+
+cardinality 2048
+  arm                            min    median       max   spread  vs first
+  A                          14.988   16.509   22.846    52.4%    1.000x
+  A'                         15.345   18.091   31.787   107.2%    1.024x
+  A/A delta on min: 2.32%
+
+cardinality 250000
+  arm                            min    median       max   spread  vs first
+  A                         113.364  128.170  294.270   159.6%    1.000x
+  A'                        107.508  127.856  197.601    83.8%    0.948x
+  A/A delta on min: 5.45%
+
+=== selectivity sweep (cardinality 128) ===
+
+selectivity 1%
+  arm                            min    median       max   spread  vs first
+  A                           3.775    4.693    9.155   142.5%    1.000x
+  A'                          3.785    4.800    8.577   126.6%    1.003x
+  A/A delta on min: 0.27%
+
+selectivity 50%
+  arm                            min    median       max   spread  vs first
+  A                          13.870   15.513   21.996    58.6%    1.000x
+  A'                         14.089   15.241   18.875    34.0%    1.016x
+  A/A delta on min: 1.55%
+
+selectivity 100%
+  arm                            min    median       max   spread  vs first
+  A                          17.738   18.175   21.950    23.7%    1.000x
+  A'                         17.676   18.222   25.953    46.8%    0.996x
+  A/A delta on min: 0.35%
+
+=== resolution ===
+A/A delta on min:  median 1.57%   worst 5.45%   (n=6)
+
+Decision rule: the smallest effect to be claimed is the ~19% execution-model gap.
+A resolution well under that means the harness can support the claim; a resolution
+near the 4.2% between-process floor would mean in-process alternation bought nothing.

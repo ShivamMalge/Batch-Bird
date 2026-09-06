@@ -1,8 +1,7 @@
 //! `Table` — a set of equal-length named columns held in memory.
 
-use std::collections::HashMap;
-
 use crate::error::{Error, Result};
+use crate::hash::Map;
 use crate::storage::Column;
 
 /// A columnar, in-memory table.
@@ -15,7 +14,7 @@ use crate::storage::Column;
 /// callers can ask for the row count without picking an arbitrary column to measure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Table {
-    columns: HashMap<String, Column>,
+    columns: Map<String, Column>,
     nrows: usize,
 }
 
@@ -23,7 +22,7 @@ impl Table {
     /// Build a table, checking the invariant every operator will later assume: all columns
     /// have exactly `nrows` rows. Checked once here so `Scan` can slice batches without
     /// re-validating per batch.
-    pub fn new(columns: HashMap<String, Column>, nrows: usize) -> Result<Self> {
+    pub fn new(columns: Map<String, Column>, nrows: usize) -> Result<Self> {
         for (name, column) in &columns {
             if column.len() != nrows {
                 return Err(Error::ColumnLengthMismatch {
@@ -59,11 +58,11 @@ mod tests {
     use super::*;
 
     fn table_of(pairs: Vec<(&str, Column)>, nrows: usize) -> Result<Table> {
-        let map = pairs
-            .into_iter()
-            .map(|(n, c)| (n.to_string(), c))
-            .collect::<HashMap<_, _>>();
-        Table::new(map, nrows)
+        let mut columns = crate::hash::map();
+        for (name, column) in pairs {
+            columns.insert(name.to_string(), column);
+        }
+        Table::new(columns, nrows)
     }
 
     #[test]

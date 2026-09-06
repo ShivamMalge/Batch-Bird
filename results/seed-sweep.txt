@@ -1,0 +1,15 @@
+499456 rows surviving, cardinality 250000, min of 7
+
+  seed 0xba7cb18d00000001    30.586 ms <- default
+  seed 0x0000000000000001    29.399 ms
+  seed 0x9e3779b97f4a7c15    29.254 ms
+  seed 0x00000000deadbeef    32.391 ms
+  seed 0xffffffffffffffff    31.072 ms
+
+spread across seeds: 10.7%
+default vs mean:     +0.1%
+
+The first number is how much the choice of seed can matter at all; the second is the
+bias our particular seed introduces. A small second number means fixing the seed cost
+us accuracy we can ignore. A large one means collision pattern is a real variable and
+belongs in the write-up rather than buried in a constant.

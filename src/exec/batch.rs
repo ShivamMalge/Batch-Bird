@@ -16,22 +16,21 @@
 //! supposed to come from cache behaviour and amortized dispatch, not from copying. Changing
 //! `Column` to hold shared buffers is a change to a pinned type, so it needs sign-off.
 
-use std::collections::HashMap;
-
 use crate::error::Result;
+use crate::hash::Map;
 use crate::storage::{Column, Table};
 
 /// A slice of rows in columnar form.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordBatch {
-    columns: HashMap<String, Column>,
+    columns: Map<String, Column>,
     len: usize,
 }
 
 impl RecordBatch {
     /// Build a batch. In debug builds every column is checked against `len`; operators are
     /// built once and validated then, so release builds do not re-pay for it per batch.
-    pub fn new(columns: HashMap<String, Column>, len: usize) -> Self {
+    pub fn new(columns: Map<String, Column>, len: usize) -> Self {
         debug_assert!(
             columns.values().all(|c| c.len() == len),
             "every column in a batch must have exactly {len} rows"
@@ -83,7 +82,7 @@ mod tests {
     use super::*;
 
     fn batch() -> RecordBatch {
-        let mut columns = HashMap::new();
+        let mut columns = crate::hash::map();
         columns.insert("a".to_string(), Column::Int64(vec![1, 2, 3]));
         columns.insert("b".to_string(), Column::Float64(vec![1.0, 2.0, 3.0]));
         RecordBatch::new(columns, 3)
@@ -126,7 +125,7 @@ mod tests {
 
     #[test]
     fn an_empty_batch_is_valid() {
-        let batch = RecordBatch::new(HashMap::new(), 0);
+        let batch = RecordBatch::new(crate::hash::map(), 0);
         assert!(batch.is_empty());
         assert_eq!(batch.ncols(), 0);
     }
@@ -134,7 +133,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "every column in a batch must have exactly")]
     fn debug_builds_catch_ragged_batches() {
-        let mut columns = HashMap::new();
+        let mut columns = crate::hash::map();
         columns.insert("a".to_string(), Column::Int64(vec![1, 2]));
         RecordBatch::new(columns, 3);
     }

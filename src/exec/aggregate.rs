@@ -150,9 +150,10 @@ pub struct Aggregate<I, T, A> {
     output_column: String,
 
     /// Group key -> accumulator slot. `hashbrown` because std's SipHash on an 8-byte key
-    /// would dominate phase 1's timing and blur what the benchmark is measuring
-    /// (`techstack.md`).
-    index: hashbrown::HashMap<GroupKey, usize>,
+    /// would dominate phase 1's timing (`techstack.md`), and a **fixed** seed because a
+    /// random one gives every process a different collision pattern and made runs
+    /// incomparable (`crate::hash`).
+    index: crate::hash::Map<GroupKey, usize>,
     /// Slot order, so results come out in first-seen order and the key for each slot is known.
     keys: Vec<GroupKey>,
     accumulators: Vec<A>,
@@ -198,7 +199,7 @@ impl<I: Operator, T: Summable, A: Accumulator<T> + Default> Aggregate<I, T, A> {
             group_kind,
             value_column,
             output_column,
-            index: hashbrown::HashMap::new(),
+            index: crate::hash::map(),
             keys: Vec::new(),
             accumulators: Vec::new(),
             slots: Vec::new(),
@@ -308,7 +309,7 @@ impl<I: Operator, T: Summable, A: Accumulator<T> + Default> Aggregate<I, T, A> {
 
         let totals: Vec<T> = self.accumulators.iter().map(|a| a.finalize()).collect();
 
-        let mut columns = std::collections::HashMap::with_capacity(2);
+        let mut columns = crate::hash::map_with_capacity(2);
         columns.insert(self.group_column.clone(), group_column);
         columns.insert(self.output_column.clone(), T::into_column(totals));
 
@@ -490,6 +491,7 @@ mod tests {
             scan,
             "amount".to_string(),
             FilterKind::IntVsInt(CompareOp::Gt, 100),
+            vec!["region".to_string(), "amount".to_string()],
         );
         let mut agg: Aggregate<_, i64, SumAccumulator<i64>> = Aggregate::new(
             filter,

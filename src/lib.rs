@@ -15,6 +15,7 @@
 pub mod bench;
 pub mod error;
 pub mod exec;
+pub mod hash;
 pub mod parser;
 pub mod plan;
 pub mod storage;

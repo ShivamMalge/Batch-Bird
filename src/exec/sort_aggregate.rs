@@ -205,7 +205,7 @@ impl<I: Operator, T: Summable> SortAggregate<I, T> {
             },
         };
 
-        let mut columns = std::collections::HashMap::with_capacity(2);
+        let mut columns = crate::hash::map_with_capacity(2);
         columns.insert(self.group_column.clone(), group_column);
         columns.insert(self.output_column.clone(), T::into_column(totals));
 

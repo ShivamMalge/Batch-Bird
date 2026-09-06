@@ -10,6 +10,8 @@
 //! -- and cargo only lets `benches/` targets be benchmarks, not dependencies. The criterion
 //! harnesses that time this code live in `benches/` at the crate root (Phase 6).
 
+pub mod data;
+pub mod harness;
 mod naive;
 mod row_store;
 

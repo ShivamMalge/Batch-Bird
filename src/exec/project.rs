@@ -8,8 +8,6 @@
 //! the incoming batch and the rest are dropped, so projecting is a few pointer moves plus
 //! freeing what is no longer needed.
 
-use std::collections::HashMap;
-
 use crate::exec::Operator;
 use crate::exec::batch::RecordBatch;
 
@@ -29,7 +27,7 @@ impl<I: Operator> Operator for Project<I> {
         let mut batch = self.input.next_batch()?;
         let len = batch.len();
 
-        let mut columns = HashMap::with_capacity(self.columns.len());
+        let mut columns = crate::hash::map_with_capacity(self.columns.len());
         for name in &self.columns {
             let column = batch
                 .take_column(name)

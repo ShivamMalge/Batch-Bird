@@ -1,0 +1,173 @@
+-- detected ------------------------------------------------
+         os:          windows / x86_64
+         cpu:         AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD
+         rustc:       rustc 1.94.0 (4a4ef493e 2026-03-02)
+         profile:     release, codegen-units=1, lto=thin, debug=true
+         simd:        off (scalar kernels)
+         data seed:   0xba7cb12d
+         hasher seed: 0xba7cb18d00000001  (fixed; see crate::hash)
+         -- declared -----------------------------------------------
+         power: Balanced + PROCTHROTTLEMIN/MAX 99%; affinity: core 0; estimator: min-of-N; alternating in-process
+
+harness resolution (examples/aa_null.rs): median 1.57%, worst 5.45%
+A difference smaller than that is not a difference. 30 samples, 3 warmup, alternated ABC per sample, minimum reported.
+
+=== row count (cardinality 128, selectivity 50%) ===
+
+250000 rows  (columnar working set 3 MB, L3 is 16 MB)
+  arm                            min    median       max   spread  vs first
+  row-oriented                5.906    6.233   10.180    72.4%    1.000x
+  columnar-naive              3.532    3.625    6.901    95.4%    0.598x
+  batched                     2.483    2.603    3.506    41.2%    0.420x
+  layout gap (row/naive):     1.67x        23.62 ns/row -> 14.13 ns/row
+  execution gap (naive/batched): 1.42x     14.13 ns/row -> 9.93 ns/row
+
+1000000 rows  (columnar working set 12 MB, L3 is 16 MB)
+  arm                            min    median       max   spread  vs first
+  row-oriented               23.569   29.380   84.413   258.1%    1.000x
+  columnar-naive             14.081   17.502   34.155   142.6%    0.597x
+  batched                     9.783   11.632   47.730   387.9%    0.415x
+  layout gap (row/naive):     1.67x        23.57 ns/row -> 14.08 ns/row
+  execution gap (naive/batched): 1.44x     14.08 ns/row -> 9.78 ns/row
+
+2000000 rows  (columnar working set 24 MB, L3 is 16 MB)
+  arm                            min    median       max   spread  vs first
+  row-oriented               48.795   56.427  120.481   146.9%    1.000x
+  columnar-naive             28.291   30.884   67.454   138.4%    0.580x
+  batched                    19.915   22.005   90.951   356.7%    0.408x
+  layout gap (row/naive):     1.72x        24.40 ns/row -> 14.15 ns/row
+  execution gap (naive/batched): 1.42x     14.15 ns/row -> 9.96 ns/row
+
+4000000 rows  (columnar working set 48 MB, L3 is 16 MB)
+  arm                            min    median       max   spread  vs first
+  row-oriented               95.817  126.348  149.623    56.2%    1.000x
+  columnar-naive             56.346   70.103   85.587    51.9%    0.588x
+  batched                    39.015   55.386  179.807   360.9%    0.407x
+  layout gap (row/naive):     1.70x        23.95 ns/row -> 14.09 ns/row
+  execution gap (naive/batched): 1.44x     14.09 ns/row -> 9.75 ns/row
+
+8000000 rows  (columnar working set 96 MB, L3 is 16 MB)
+  arm                            min    median       max   spread  vs first
+  row-oriented              190.534  205.766  224.178    17.7%    1.000x
+  columnar-naive            113.480  119.919  128.575    13.3%    0.596x
+  batched                    77.992   83.148   95.914    23.0%    0.409x
+  layout gap (row/naive):     1.68x        23.82 ns/row -> 14.18 ns/row
+  execution gap (naive/batched): 1.46x     14.18 ns/row -> 9.75 ns/row
+
+
+=== selectivity (1M rows, cardinality 128) ===
+Scan copies every batch unconditionally before the filter runs, so the ends of
+this sweep are where copy-on-scan costs most relative to what it returns.
+
+selectivity 1%
+  arm                            min    median       max   spread  vs first
+  row-oriented                4.151    5.471   11.535   177.9%    1.000x
+  columnar-naive              4.151    6.275    8.018    93.1%    1.000x
+  batched                     4.636    6.856   11.345   144.7%    1.117x
+  layout gap (row/naive):     1.00x        4.15 ns/row -> 4.15 ns/row
+  execution gap (naive/batched): 0.90x     4.15 ns/row -> 4.64 ns/row
+
+selectivity 10%
+  arm                            min    median       max   spread  vs first
+  row-oriented               12.211   13.513   22.855    87.2%    1.000x
+  columnar-naive              4.985    5.175   10.252   105.7%    0.408x
+  batched                     5.664    6.154   10.979    93.8%    0.464x
+  layout gap (row/naive):     2.45x        12.21 ns/row -> 4.99 ns/row
+  execution gap (naive/batched): 0.88x     4.99 ns/row -> 5.66 ns/row
+
+selectivity 50%
+  arm                            min    median       max   spread  vs first
+  row-oriented               24.130   28.701   37.093    53.7%    1.000x
+  columnar-naive             14.099   15.385   23.820    69.0%    0.584x
+  batched                     9.547   11.482   19.394   103.1%    0.396x
+  layout gap (row/naive):     1.71x        24.13 ns/row -> 14.10 ns/row
+  execution gap (naive/batched): 1.48x     14.10 ns/row -> 9.55 ns/row
+
+selectivity 90%
+  arm                            min    median       max   spread  vs first
+  row-oriented               37.809   45.718   57.839    53.0%    1.000x
+  columnar-naive             18.011   19.597   24.651    36.9%    0.476x
+  batched                    13.904   22.601   28.581   105.6%    0.368x
+  layout gap (row/naive):     2.10x        37.81 ns/row -> 18.01 ns/row
+  execution gap (naive/batched): 1.30x     18.01 ns/row -> 13.90 ns/row
+
+selectivity 100%
+  arm                            min    median       max   spread  vs first
+  row-oriented               41.621   42.355   62.480    50.1%    1.000x
+  columnar-naive             18.027   21.875   22.212    23.2%    0.433x
+  batched                    14.493   14.731  109.975   658.8%    0.348x
+  layout gap (row/naive):     2.31x        41.62 ns/row -> 18.03 ns/row
+  execution gap (naive/batched): 1.24x     18.03 ns/row -> 14.49 ns/row
+
+
+=== cardinality (1M rows, selectivity 50%) ===
+
+cardinality 8
+  arm                            min    median       max   spread  vs first
+  row-oriented               22.171   22.419   23.241     4.8%    1.000x
+  columnar-naive             13.991   14.119   14.305     2.2%    0.631x
+  batched                     9.628    9.905   10.360     7.6%    0.434x
+  layout gap (row/naive):     1.58x        22.17 ns/row -> 13.99 ns/row
+  execution gap (naive/batched): 1.45x     13.99 ns/row -> 9.63 ns/row
+
+cardinality 128
+  arm                            min    median       max   spread  vs first
+  row-oriented               23.535   23.910   24.390     3.6%    1.000x
+  columnar-naive             14.074   14.253   14.529     3.2%    0.598x
+  batched                     9.504    9.684   10.115     6.4%    0.404x
+  layout gap (row/naive):     1.67x        23.53 ns/row -> 14.07 ns/row
+  execution gap (naive/batched): 1.48x     14.07 ns/row -> 9.50 ns/row
+
+cardinality 2048
+  arm                            min    median       max   spread  vs first
+  row-oriented               45.180   45.766   46.395     2.7%    1.000x
+  columnar-naive             14.964   15.118   18.528    23.8%    0.331x
+  batched                    10.320   10.579   10.979     6.4%    0.228x
+  layout gap (row/naive):     3.02x        45.18 ns/row -> 14.96 ns/row
+  execution gap (naive/batched): 1.45x     14.96 ns/row -> 10.32 ns/row
+
+cardinality 32768
+  arm                            min    median       max   spread  vs first
+  row-oriented              140.339  144.163  154.277     9.9%    1.000x
+  columnar-naive             35.872   37.738   40.173    12.0%    0.256x
+  batched                    20.087   21.089   23.262    15.8%    0.143x
+  layout gap (row/naive):     3.91x        140.34 ns/row -> 35.87 ns/row
+  execution gap (naive/batched): 1.79x     35.87 ns/row -> 20.09 ns/row
+
+cardinality 250000
+  arm                            min    median       max   spread  vs first
+  row-oriented              810.579  833.346  945.975    16.7%    1.000x
+  columnar-naive             91.931   96.229  108.973    18.5%    0.113x
+  batched                    75.534   79.029   86.586    14.6%    0.093x
+  layout gap (row/naive):     8.82x        810.58 ns/row -> 91.93 ns/row
+  execution gap (naive/batched): 1.22x     91.93 ns/row -> 75.53 ns/row
+
+
+=== group-by strategy (1M rows, selectivity 50%) ===
+hash-group carries a +/-10.7% seed-dependent variance component
+(examples/seed_sweep.rs); sort-group carries none, since a sort has no collision
+pattern. Read the hash column with that band, not as a point.
+
+cardinality 8
+  arm                            min    median       max   spread  vs first
+  hash                        9.463    9.637   10.054     6.2%    1.000x
+  sort                       19.266   19.756   20.434     6.1%    2.036x
+  sort/hash: 2.04x   hash wins
+
+cardinality 2048
+  arm                            min    median       max   spread  vs first
+  hash                       10.306   10.590   10.961     6.4%    1.000x
+  sort                       25.209   25.861   27.046     7.3%    2.446x
+  sort/hash: 2.45x   hash wins
+
+cardinality 32768
+  arm                            min    median       max   spread  vs first
+  hash                       22.189   23.009   24.201     9.1%    1.000x
+  sort                       37.354   38.309   39.383     5.4%    1.683x
+  sort/hash: 1.68x   hash wins
+
+cardinality 250000
+  arm                            min    median       max   spread  vs first
+  hash                       75.203   79.437   89.064    18.4%    1.000x
+  sort                       67.726   69.350   70.630     4.3%    0.901x
+  sort/hash: 0.90x   within hash's seed variance -- not separable

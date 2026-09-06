@@ -261,11 +261,10 @@ pub fn read_csv<R: Read>(reader: R, schema: &Schema) -> Result<Table> {
         nrows += 1;
     }
 
-    let columns = names
-        .into_iter()
-        .zip(builders)
-        .map(|(name, builder)| (name, builder.finish()))
-        .collect::<HashMap<_, _>>();
+    let mut columns = crate::hash::map_with_capacity(names.len());
+    for (name, builder) in names.into_iter().zip(builders) {
+        columns.insert(name, builder.finish());
+    }
 
     Table::new(columns, nrows)
 }

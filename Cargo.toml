@@ -33,3 +33,14 @@ criterion = { version = "0.8.2", features = ["html_reports", "csv_output"] }
 codegen-units = 1
 debug = true
 lto = "thin"
+
+# Harness targets must be declared, and `harness = false` hands the main function to
+# criterion instead of libtest. Both jobs in CI compile these with `--no-run`, which is what
+# keeps them from rotting between benchmark runs.
+[[bench]]
+name = "arms"
+harness = false
+
+[[bench]]
+name = "group_by"
+harness = false
