@@ -9,27 +9,30 @@
 //! changing its results). A benchmark that compares arms producing different answers is
 //! measuring nothing, so this suite is what makes the numbers in `phases.md` mean anything.
 //!
-//! # Why equality can be exact, even for floats
-//! Both engines visit surviving rows in the same global order: the baseline sweeps rows
-//! 0..n, and the pipeline sweeps batches in order and rows in order within each batch, with
-//! compaction preserving relative order. So every group's accumulator sees the same values in
-//! the same sequence, and `f64` sums come out bit-identical despite floating-point addition
-//! being non-associative.
+//! # Integers exact, floats within a tolerance — and why the line is drawn there
+//! Integer sums are asserted **bit-identical** across every arm and both strategies. Integer
+//! addition stays associative even when it wraps, and every arm wraps, so nothing about
+//! ordering or vectorization can make them disagree. A tolerance there would hide real bugs.
 //!
-//! Phase 5 did **not** change this, contrary to what the phase notes predicted. The SIMD
-//! filter is exact (a comparison has no rounding), and the SIMD sum reduction is not on this
-//! path at all — the hash group-by scatters into per-group accumulators rather than reducing
-//! a dense slice. These assertions therefore still hold bit-for-bit under
-//! `cargo +nightly test --features simd`, which is a stronger check than a tolerance would be.
+//! Float sums get a **relative tolerance**, because two arms genuinely accumulate in different
+//! orders and floating-point addition is not associative:
+//! - Row-oriented, columnar naive, and hash group-by all visit surviving rows in the same
+//!   global order, so they agree bit-for-bit.
+//! - **Sort group-by does not.** It sorts rows by key, so a group's values are summed in key
+//!   order rather than file order — and under `--features simd` its run reduction is lane-wise
+//!   as well, eight partial sums combined at the end.
 //!
-//! **Phase 6 is where it changes.** Sort-based grouping makes each group contiguous, so its
-//! aggregation *is* a dense reduction and will use the lane-wise sum. Float comparisons
-//! against this engine will need a tolerance then; integer sums stay exact regardless,
-//! because every path wraps.
+//! This is the change Phase 5's notes predicted for Phase 6. Phase 5 itself kept bit-exactness
+//! because the SIMD sum never reached the query path: hash group-by scatters into per-group
+//! accumulators and has no dense slice to hand a kernel. Sort group-by is what puts it there.
+//!
+//! Neither order is "wrong", and the lane-wise one is often *more* accurate — eight shorter
+//! chains accumulate less rounding error than one long one. `float_sum_orders_actually_differ`
+//! pins that the orders really do diverge, so the tolerance cannot pass vacuously.
 
 use batchbird::bench::{naive_query, row_query};
 use batchbird::parser::parse;
-use batchbird::plan::batch_query;
+use batchbird::plan::{GroupStrategy, batch_query, batch_query_with};
 use batchbird::storage::{Column, DataType, Field, Schema, Table, infer_schema, read_csv};
 
 /// Deterministic pseudo-random numbers, so a failure is always reproducible.
@@ -94,19 +97,23 @@ fn synthetic_table(rows: usize, cardinality: u64, seed: u64) -> Table {
     read_csv(csv.as_bytes(), &schema).expect("csv load")
 }
 
+/// One result row's sum: exact for integers, compared with a tolerance for floats.
+#[derive(Debug, Clone, PartialEq)]
+enum Sum {
+    Int(i64),
+    Float(f64),
+}
+
 /// Result rows as sortable `(group, sum)` pairs.
 ///
-/// Sorting is required, not cosmetic: group order is unspecified in both engines and they
-/// genuinely differ — the baseline emits first-seen order over all rows, the pipeline over
-/// surviving rows. Comparing raw `Table`s would fail on ordering alone.
-///
-/// Sums are compared through their exact bit patterns (`to_bits` for floats), so this cannot
-/// paper over a last-ULP difference the way formatting would.
-fn rows_of(result: &Table, group: &str, agg: &str) -> Vec<(String, u64)> {
+/// Sorting is required, not cosmetic: group order is unspecified everywhere and the arms
+/// genuinely differ — first-seen over all rows, first-seen over surviving rows, and key order
+/// for sort-group. Comparing raw `Table`s would fail on ordering alone.
+fn rows_of(result: &Table, group: &str, agg: &str) -> Vec<(String, Sum)> {
     let group_col = result.column(group).expect("group column");
     let agg_col = result.column(agg).expect("agg column");
 
-    let mut rows: Vec<(String, u64)> = (0..result.nrows())
+    let mut rows: Vec<(String, Sum)> = (0..result.nrows())
         .map(|row| {
             let key = match group_col {
                 Column::Int64(v) => v[row].to_string(),
@@ -114,16 +121,47 @@ fn rows_of(result: &Table, group: &str, agg: &str) -> Vec<(String, u64)> {
                 Column::Float64(_) => unreachable!("floats cannot be group keys"),
             };
             let sum = match agg_col {
-                Column::Int64(v) => v[row] as u64,
-                Column::Float64(v) => v[row].to_bits(),
+                Column::Int64(v) => Sum::Int(v[row]),
+                Column::Float64(v) => Sum::Float(v[row]),
                 Column::Utf8Dict { .. } => unreachable!("sums are numeric"),
             };
             (key, sum)
         })
         .collect();
 
-    rows.sort();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
     rows
+}
+
+/// Assert two arms agree: integers exactly, floats within a relative tolerance.
+///
+/// See the module docs for why the line falls there. The tolerance absorbs a different
+/// summation order over millions of values and is far too tight to absorb an arithmetic bug.
+fn assert_rows_match(expected: &[(String, Sum)], actual: &[(String, Sum)], context: &str) {
+    assert_eq!(
+        expected.len(),
+        actual.len(),
+        "{context}: different number of groups"
+    );
+
+    for ((expected_key, expected_sum), (actual_key, actual_sum)) in expected.iter().zip(actual) {
+        assert_eq!(expected_key, actual_key, "{context}: group labels differ");
+
+        match (expected_sum, actual_sum) {
+            (Sum::Int(a), Sum::Int(b)) => assert_eq!(
+                a, b,
+                "{context}: integer sums must be bit-identical for group {expected_key:?}"
+            ),
+            (Sum::Float(a), Sum::Float(b)) => {
+                let tolerance = a.abs() * 1e-12 + 1e-9;
+                assert!(
+                    (a - b).abs() <= tolerance,
+                    "{context}: float sums differ beyond rounding for {expected_key:?}: {a} vs {b}"
+                );
+            }
+            _ => panic!("{context}: result types differ for group {expected_key:?}"),
+        }
+    }
 }
 
 /// Run every arm and assert they agree exactly with the oracle.
@@ -136,7 +174,11 @@ fn assert_parity(table: &Table, sql: &str) -> usize {
     let expected = rows_of(&naive, group, &agg);
 
     let arms = [
-        ("batched", batch_query(table, &plan)),
+        ("batched/hash", batch_query(table, &plan)),
+        (
+            "batched/sort",
+            batch_query_with(table, &plan, GroupStrategy::Sort),
+        ),
         ("row-oriented", row_query(table, &plan)),
     ];
 
@@ -158,10 +200,10 @@ fn assert_parity(table: &Table, sql: &str) -> usize {
             "{name}: result schema differs for {sql:?}"
         );
 
-        assert_eq!(
-            expected,
-            rows_of(&result, group, &agg),
-            "{name}: results differ for {sql:?}"
+        assert_rows_match(
+            &expected,
+            &rows_of(&result, group, &agg),
+            &format!("{name} on {sql:?}"),
         );
     }
 
@@ -311,16 +353,17 @@ fn the_row_oriented_arm_holds_an_independent_copy_of_the_data() {
 }
 
 #[test]
-fn engines_agree_on_float_sums_bit_for_bit() {
-    // Documented above: identical accumulation order means identical bits, today. When Phase 5
-    // reduces across SIMD lanes this is the assertion that will start failing, and that
-    // failure is informative rather than a bug — it is the non-associativity showing up.
+fn arms_sharing_an_accumulation_order_stay_bit_for_bit() {
+    // The arms that visit rows in the same order must agree exactly -- a tolerance here would
+    // be slack the implementation has not earned. Only sort-group is exempt, and only because
+    // it genuinely sums in a different order.
     let table = synthetic_table(5_000, 8, 0xF10A);
     let plan =
         parse("SELECT region, SUM(price) FROM t WHERE price > -250 GROUP BY region").unwrap();
 
     let naive = naive_query(&table, &plan).unwrap();
     let batched = batch_query(&table, &plan).unwrap();
+    let rows = row_query(&table, &plan).unwrap();
 
     let naive_sums = naive.column("SUM(price)").unwrap().as_f64().unwrap();
     assert!(
@@ -328,9 +371,67 @@ fn engines_agree_on_float_sums_bit_for_bit() {
         "the test data should produce genuinely fractional sums"
     );
 
+    let expected = rows_of(&naive, "region", "SUM(price)");
+    assert_eq!(expected, rows_of(&batched, "region", "SUM(price)"));
+    assert_eq!(expected, rows_of(&rows, "region", "SUM(price)"));
+}
+
+#[test]
+fn sort_group_float_sums_diverge_under_simd() {
+    // Guards the float tolerance against being slack nobody needs.
+    //
+    // On the scalar path this test cannot show a divergence, and saying so is the honest
+    // version: with a single group, sorting does not reorder anything, so sort-group sums in
+    // the same order as everyone else. The divergence the tolerance exists for is the
+    // *lane-wise* reduction, which only runs with `--features simd`.
+    //
+    // One huge value, then many small ones: 1.0 sits below the ULP of 2^53, so a serial chain
+    // absorbs every addend into nothing while eight parallel lanes accumulate the small values
+    // together and keep them.
+    let mut csv = String::from(
+        "k,v
+",
+    );
+    for i in 0..4_000 {
+        if i % 2_000 == 0 {
+            csv.push_str(
+                "big,9007199254740992.0
+",
+            );
+        }
+        csv.push_str(
+            "big,1.0
+",
+        );
+    }
+
+    let table = table(&csv);
+    let plan = parse("SELECT k, SUM(v) FROM t WHERE v > 0 GROUP BY k").unwrap();
+
+    let naive = naive_query(&table, &plan).unwrap();
+    let sorted = batch_query_with(&table, &plan, GroupStrategy::Sort).unwrap();
+
+    let naive_sum = naive.column("SUM(v)").unwrap().as_f64().unwrap()[0];
+    let sorted_sum = sorted.column("SUM(v)").unwrap().as_f64().unwrap()[0];
+    assert!(naive_sum.is_finite() && sorted_sum.is_finite());
+
+    // Whatever the order, the answers must still agree to within rounding.
+    assert_rows_match(
+        &rows_of(&naive, "k", "SUM(v)"),
+        &rows_of(&sorted, "k", "SUM(v)"),
+        "sort-group vs naive",
+    );
+
+    #[cfg(feature = "simd")]
+    assert_ne!(
+        naive_sum, sorted_sum,
+        "lane-wise reduction should reach a different sum than the serial chain here;          if this passes trivially the tolerance is no longer testing anything"
+    );
+
+    #[cfg(not(feature = "simd"))]
     assert_eq!(
-        rows_of(&naive, "region", "SUM(price)"),
-        rows_of(&batched, "region", "SUM(price)")
+        naive_sum, sorted_sum,
+        "on the scalar path a single group is summed in the same order by both"
     );
 }
 
@@ -353,10 +454,12 @@ fn both_engines_reject_the_same_invalid_plans() {
         let plan = parse(sql).unwrap();
         let naive = naive_query(&table, &plan);
         let batched = batch_query(&table, &plan);
+        let sorted = batch_query_with(&table, &plan, GroupStrategy::Sort);
         let rows = row_query(&table, &plan);
 
         assert!(naive.is_err(), "naive accepted {sql:?}");
         assert!(batched.is_err(), "batched accepted {sql:?}");
+        assert!(sorted.is_err(), "sort-group accepted {sql:?}");
         assert!(rows.is_err(), "row-oriented accepted {sql:?}");
 
         // Identical messages, not merely identical failure: the three arms validate
@@ -367,6 +470,11 @@ fn both_engines_reject_the_same_invalid_plans() {
             reason,
             batched.unwrap_err().to_string(),
             "batched disagrees on why {sql:?} is invalid"
+        );
+        assert_eq!(
+            reason,
+            sorted.unwrap_err().to_string(),
+            "sort-group disagrees on why {sql:?} is invalid"
         );
         assert_eq!(
             reason,

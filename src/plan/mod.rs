@@ -8,4 +8,6 @@ mod logical;
 mod physical;
 
 pub use logical::{AggFunc, Aggregation, CompareOp, Literal, LogicalPlan, Predicate};
-pub use physical::{BatchPipeline, batch_query, build};
+pub use physical::{
+    BatchPipeline, GroupStrategy, batch_query, batch_query_with, build, build_with,
+};

@@ -15,7 +15,8 @@
 
 use crate::error::{Error, Result};
 use crate::exec::{
-    Aggregate, Filter, FilterKind, GroupKind, Operator, Project, Scan, SumAccumulator,
+    Aggregate, Filter, FilterKind, GroupKind, Operator, Project, Scan, SortAggregate,
+    SumAccumulator,
 };
 use crate::plan::logical::{CompareOp, Literal, LogicalPlan};
 use crate::storage::{Column, Table};
@@ -23,18 +24,42 @@ use crate::storage::{Column, Table};
 /// The fixed shape of every pipeline this engine builds, below the aggregate.
 type Source<'a> = Project<Filter<Scan<'a>>>;
 
-/// A built, validated pipeline, specialized to the aggregated column's type.
+/// Which group-by strategy to build.
+///
+/// Both are real, selectable strategies rather than one replacing the other -- the benchmark
+/// needs to drive either over identical input (`systemDesign.md` "Sort-Based Grouping").
+/// [`GroupStrategy::Hash`] is the default everywhere except where a benchmark asks otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupStrategy {
+    /// Hash map from key to accumulator slot, then a data-dependent scatter. O(n), O(groups)
+    /// memory, unvectorizable second phase.
+    #[default]
+    Hash,
+    /// Sort by key, then reduce contiguous runs. O(n log n), O(rows) memory, and the only path
+    /// on which the SIMD sum kernel reaches a real query.
+    Sort,
+}
+
+/// A built, validated pipeline, specialized to the aggregated column's type and the group-by
+/// strategy.
+///
+/// Four variants for two binary choices. Both are resolved **once per query**, here, after
+/// which every per-row call is direct and inlined.
 pub enum BatchPipeline<'a> {
-    Int64(Aggregate<Source<'a>, i64, SumAccumulator<i64>>),
-    Float64(Aggregate<Source<'a>, f64, SumAccumulator<f64>>),
+    HashInt64(Aggregate<Source<'a>, i64, SumAccumulator<i64>>),
+    HashFloat64(Aggregate<Source<'a>, f64, SumAccumulator<f64>>),
+    SortInt64(SortAggregate<Source<'a>, i64>),
+    SortFloat64(SortAggregate<Source<'a>, f64>),
 }
 
 impl BatchPipeline<'_> {
     /// Drain the pipeline and materialize the result.
     pub fn execute(mut self) -> Result<Table> {
         let batch = match &mut self {
-            BatchPipeline::Int64(agg) => agg.next_batch(),
-            BatchPipeline::Float64(agg) => agg.next_batch(),
+            BatchPipeline::HashInt64(agg) => agg.next_batch(),
+            BatchPipeline::HashFloat64(agg) => agg.next_batch(),
+            BatchPipeline::SortInt64(agg) => agg.next_batch(),
+            BatchPipeline::SortFloat64(agg) => agg.next_batch(),
         };
 
         batch
@@ -43,8 +68,17 @@ impl BatchPipeline<'_> {
     }
 }
 
-/// Build the operator tree for `plan` over `table`.
+/// Build the operator tree for `plan` over `table`, using the default hash group-by.
 pub fn build<'a>(table: &'a Table, plan: &LogicalPlan) -> Result<BatchPipeline<'a>> {
+    build_with(table, plan, GroupStrategy::default())
+}
+
+/// Build the operator tree with an explicit group-by strategy.
+pub fn build_with<'a>(
+    table: &'a Table,
+    plan: &LogicalPlan,
+    strategy: GroupStrategy,
+) -> Result<BatchPipeline<'a>> {
     let group_kind = group_kind(table, &plan.group_by)?;
     let filter_kind = filter_kind(table, plan)?;
 
@@ -71,29 +105,55 @@ pub fn build<'a>(table: &'a Table, plan: &LogicalPlan) -> Result<BatchPipeline<'
     let value_column = plan.aggregation.input.clone();
     let output_column = plan.aggregation.output_name();
 
-    // The one dispatch point: pick the monomorphized aggregate for this column's type.
-    Ok(match value_column_kind(table, &value_column)? {
-        ValueKind::Int64 => BatchPipeline::Int64(Aggregate::new(
+    // The one dispatch point: pick the monomorphized aggregate for this column's type and
+    // the requested strategy.
+    Ok(match (strategy, value_column_kind(table, &value_column)?) {
+        (GroupStrategy::Hash, ValueKind::Int64) => BatchPipeline::HashInt64(Aggregate::new(
             source,
             group_columns,
             group_kind,
             value_column,
             output_column,
         )),
-        ValueKind::Float64 => BatchPipeline::Float64(Aggregate::new(
+        (GroupStrategy::Hash, ValueKind::Float64) => BatchPipeline::HashFloat64(Aggregate::new(
             source,
             group_columns,
             group_kind,
             value_column,
             output_column,
         )),
+        (GroupStrategy::Sort, ValueKind::Int64) => BatchPipeline::SortInt64(SortAggregate::new(
+            source,
+            group_columns,
+            group_kind,
+            value_column,
+            output_column,
+        )),
+        (GroupStrategy::Sort, ValueKind::Float64) => {
+            BatchPipeline::SortFloat64(SortAggregate::new(
+                source,
+                group_columns,
+                group_kind,
+                value_column,
+                output_column,
+            ))
+        }
     })
 }
 
-/// Build and run in one step, mirroring [`naive_query`](crate::bench::naive_query) so the two
+/// Build and run in one step, mirroring [`naive_query`](crate::bench::naive_query) so the
 /// engines are called the same way.
 pub fn batch_query(table: &Table, plan: &LogicalPlan) -> Result<Table> {
     build(table, plan)?.execute()
+}
+
+/// Build and run with an explicit group-by strategy.
+pub fn batch_query_with(
+    table: &Table,
+    plan: &LogicalPlan,
+    strategy: GroupStrategy,
+) -> Result<Table> {
+    build_with(table, plan, strategy)?.execute()
 }
 
 enum ValueKind {

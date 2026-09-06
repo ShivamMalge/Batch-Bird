@@ -93,6 +93,15 @@ impl Accumulator<f64> for SumAccumulator<f64> {
 pub trait Summable: Copy + Default {
     fn slice_of(column: &Column) -> Option<&[Self]>;
     fn into_column(values: Vec<Self>) -> Column;
+
+    /// Sum a dense, contiguous slice.
+    ///
+    /// Hash group-by never calls this -- it scatters into per-group accumulators, and a
+    /// scatter has no slice to hand over. [`SortAggregate`](crate::exec::SortAggregate) does:
+    /// sorting makes each group's values contiguous, so a run *is* a dense slice. This is the
+    /// single seam through which the Phase 5 SIMD sum kernel reaches the query path, and it is
+    /// why sort-group can vectorize its aggregation where hash-group cannot.
+    fn sum_slice(values: &[Self]) -> Self;
 }
 
 impl Summable for i64 {
@@ -103,6 +112,10 @@ impl Summable for i64 {
     fn into_column(values: Vec<Self>) -> Column {
         Column::Int64(values)
     }
+
+    fn sum_slice(values: &[Self]) -> Self {
+        crate::exec::kernels::sum_i64(values)
+    }
 }
 
 impl Summable for f64 {
@@ -112,6 +125,10 @@ impl Summable for f64 {
 
     fn into_column(values: Vec<Self>) -> Column {
         Column::Float64(values)
+    }
+
+    fn sum_slice(values: &[Self]) -> Self {
+        crate::exec::kernels::sum_f64(values)
     }
 }
 

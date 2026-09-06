@@ -28,6 +28,7 @@ pub mod kernels;
 pub mod materialize;
 pub mod project;
 pub mod scan;
+pub mod sort_aggregate;
 
 pub use aggregate::{Accumulator, Aggregate, GroupKey, GroupKind, SumAccumulator, Summable};
 pub use batch::RecordBatch;
@@ -35,6 +36,7 @@ pub use bitset::Bitset;
 pub use filter::{Filter, FilterKind};
 pub use project::Project;
 pub use scan::Scan;
+pub use sort_aggregate::SortAggregate;
 
 /// Rows per batch.
 ///
