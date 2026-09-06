@@ -5,6 +5,11 @@
 # nightly — but pinning it in this file would set the toolchain for *every* command and
 # silently move the default build off stable, defeating the point. Nightly is invoked
 # explicitly instead: `cargo +nightly test --features simd`.
+#
+# The corollary bit CI once: pinning stable here overrides whatever toolchain a CI action
+# installs as the default, so a nightly job must also say `cargo +nightly` on every command.
+# A bare `cargo clippy --features simd` runs on stable and fails with E0554. See
+# .github/workflows/ci.yml.
 [toolchain]
 channel = "stable"
 components = ["clippy", "rustfmt"]

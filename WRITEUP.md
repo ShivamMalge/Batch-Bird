@@ -379,4 +379,6 @@ cargo +nightly run --release --example amdahl  --features bench-dispatch # §2 p
 ```
 
 Raw output is committed under `results/`. `phases.md` carries the full decision log, including
-everything struck and why.
+everything struck and why — including one entry added after this document was first written:
+CI was reported green on the strength of running its commands locally, and the nightly job was
+in fact failing. Verifying the commands is not verifying the system that runs them.

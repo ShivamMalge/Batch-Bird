@@ -647,8 +647,23 @@ backs every figure in it, and this file holds the decision log, including everyt
 measured, reported, and then struck.
 
 Final state: 152 tests on stable, 163 on nightly with `--features bench-dispatch`, 12 parity
-tests across four execution strategies, clippy and rustfmt clean on both configurations, CI
-green on both toolchains.
+tests across four execution strategies, clippy and rustfmt clean on all three configurations.
+
+⚠️ **CI was reported green before it was.** Every workflow command was verified locally and
+passed, and that was taken as equivalent — it is not. The nightly job was in fact failing:
+`rust-toolchain.toml` pins `channel = "stable"`, which overrides the toolchain the CI action
+installs as the default, so a bare `cargo clippy --features simd` ran on stable and died on
+`#![feature(portable_simd)]` with E0554. It was invisible locally because `cargo +nightly` is
+the one thing that overrides `rust-toolchain.toml`, and it is what a human types by hand.
+
+Fixed by making every nightly step say `cargo +nightly` explicitly, and `bench-dispatch` added
+to CI since nothing else built that configuration. The irony is on the record: the comment in
+`rust-toolchain.toml` warned that pinning a channel there governs *every* command, and that
+reasoning was applied to why nightly should not be pinned while missing that pinning stable has
+the identical effect in the other direction.
+
+Which is the same lesson as §5 of the write-up, arriving one more time: **verifying the
+commands is not verifying the system that runs them.**
 
 The headline: SIMD kernels are 1.46–3.81× faster in isolation, whole queries are ~1.00×, and the
 Amdahl arithmetic predicts that to within 0.1 percentage points. Vectorizing the two hot loops

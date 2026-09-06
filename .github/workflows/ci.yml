@@ -56,8 +56,14 @@ jobs:
       # Deliberately not pinned to a dated nightly. `std::simd` is unstable and its surface
       # does change; an unpinned nightly means CI tells us early rather than letting the
       # project drift against an API that has moved. If this becomes noisy, pin a date here
-      # rather than in rust-toolchain.toml -- that file sets the toolchain for *every*
-      # command, which would silently move the default build off stable.
+      # rather than in rust-toolchain.toml.
+      #
+      # Every step below invokes `cargo +nightly` explicitly. That is not optional:
+      # rust-toolchain.toml pins `channel = "stable"`, and it overrides the toolchain this
+      # action installs as the default. A bare `cargo clippy --features simd` here therefore
+      # runs on *stable* and dies on `#![feature(portable_simd)]` with E0554 -- which is
+      # exactly what happened, and was invisible locally because `cargo +nightly` is the one
+      # thing that overrides rust-toolchain.toml, and it is what everyone types by hand.
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -66,20 +72,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy (SIMD)
-        run: cargo clippy --all-targets --features simd -- -D warnings
+        run: cargo +nightly clippy --all-targets --features simd -- -D warnings
 
       # Runs the scalar kernels and the SIMD kernels and asserts they agree, which is the
       # check that matters most on this job.
       - name: Tests (SIMD)
-        run: cargo test --all-targets --features simd
+        run: cargo +nightly test --all-targets --features simd
 
       - name: Doctests (SIMD)
-        run: cargo test --doc --features simd
+        run: cargo +nightly test --doc --features simd
 
       - name: Benchmarks compile (SIMD)
-        run: cargo bench --no-run --features simd
+        run: cargo +nightly bench --no-run --features simd
 
       # The scalar path must keep working on nightly too, so a nightly-only regression in the
       # fallback cannot hide behind the feature being on.
       - name: Tests (scalar on nightly)
-        run: cargo test --all-targets
+        run: cargo +nightly test --all-targets
+
+      # `bench-dispatch` is a third configuration with its own code paths (runtime kernel
+      # selection) and its own example gated behind `required-features`. Nothing else in CI
+      # builds it, so without this it can rot unnoticed.
+      - name: Clippy (bench-dispatch)
+        run: cargo +nightly clippy --all-targets --features bench-dispatch -- -D warnings
+
+      - name: Tests (bench-dispatch)
+        run: cargo +nightly test --all-targets --features bench-dispatch
